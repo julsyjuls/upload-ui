@@ -62,10 +62,8 @@ export async function onRequestPost(context) {
     JSON.stringify(
       insertedRows.length
         ? { success: true, inserted: insertedRows.length, skipped_rows: skippedRows }
-        : { error: "Insert failed", skipped_rows: skippedRows },
-      null,
-      2
+        : { error: "Insert failed", skipped_rows: skippedRows }
     ),
     { headers: { "Content-Type": "application/json" } }
-  );
-}
+);
+
