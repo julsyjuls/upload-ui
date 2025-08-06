@@ -65,5 +65,5 @@ export async function onRequestPost(context) {
         : { error: "Insert failed", skipped_rows: skippedRows }
     ),
     { headers: { "Content-Type": "application/json" } }
-);
-
+  );
+}
