@@ -1,7 +1,6 @@
 export const SUPABASE_URL = "https://idtwjchmeldqwurigvkx.supabase.co";
 export const SUPABASE_KEY = "sb_publishable_NXoYAsEV8RMXoVZggIeVAg_eGrfwnVb";
 
-
 export async function onRequestPost(context) {
   const { rows } = await context.request.json();
   const insertedRows = [];
@@ -19,8 +18,8 @@ export async function onRequestPost(context) {
       const res = await fetch(`${SUPABASE_URL}/rest/v1/inventory`, {
         method: "POST",
         headers: {
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`,
           "Content-Type": "application/json",
           Prefer: "return=representation",
         },
