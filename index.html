@@ -41,16 +41,49 @@
     .error {
       color: red;
     }
+
+    /* Password overlay styles */
+    #auth-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: #fff;
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      font-family: sans-serif;
+    }
+
+    #auth-overlay input {
+      padding: 0.5rem;
+      font-size: 1rem;
+    }
+
+    #auth-overlay button {
+      margin-top: 1rem;
+      padding: 0.5rem 1rem;
+      font-size: 1rem;
+    }
+
+    #auth-error {
+      color: red;
+      margin-top: 0.5rem;
+    }
   </style>
 </head>
 <body>
-  <script>
-    const password = prompt("Enter password to access the upload tool:");
-    if (password !== "safebatch2025") {
-      alert("Access denied.");
-      document.body.innerHTML = "<h2>🚫 Unauthorized</h2>";
-    }
-  </script>
+
+  <!-- 🔐 Password Prompt Overlay -->
+  <div id="auth-overlay">
+    <h3>🔐 Enter Password</h3>
+    <input id="auth-password" type="password" placeholder="Password" />
+    <button onclick="checkPassword()">Submit</button>
+    <p id="auth-error"></p>
+  </div>
 
   <h2>Upload Inventory CSV</h2>
   <p>Please upload a .csv file with the following columns:<br>
@@ -66,6 +99,20 @@
   <input type="file" id="fileElem" accept=".csv" style="display:none" />
 
   <script>
+    // 🔐 Password protection logic
+    function checkPassword() {
+      const password = document.getElementById("auth-password").value;
+      const correctPassword = "safebatch2025"; // 🔒 Change this anytime
+      const errorMsg = document.getElementById("auth-error");
+
+      if (password === correctPassword) {
+        document.getElementById("auth-overlay").remove();
+      } else {
+        errorMsg.textContent = "❌ Incorrect password. Please try again.";
+      }
+    }
+
+    // 🧠 Upload logic
     const dropArea = document.getElementById('drop-area');
     const fileElem = document.getElementById('fileElem');
     const preview = document.getElementById('preview');
