@@ -1,5 +1,5 @@
-export const SUPABASE_URL = "https://YOUR_PROJECT.supabase.co";
-export const SUPABASE_KEY = "sbp_xxx..."; // your anon/public key
+export const SUPABASE_URL = "https://idtwjchmeldqwurigvkx.supabase.co";
+export const SUPABASE_ANON_KEY = "sb_publishable_NXoYAsEV8RMXoVZggIeVAg_eGrfwnVb";
 
 export async function onRequestPost(context) {
   const { rows } = await context.request.json();
@@ -14,64 +14,41 @@ export async function onRequestPost(context) {
       continue;
     }
 
-    // Insert into inventory — rely on trigger to resolve sku_id and batch_id
-    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/inventory`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        Prefer: "return=representation", // <— return inserted data
-      },
-      body: JSON.stringify([
-        {
-          sku_code,
-          batch_no,
-          barcode,
-          date_in,
-          warranty_months: warranty_months ? parseInt(warranty_months) : null,
-        },
-      ]),
-    });
-
-    const resultText = await insertRes.text();
-    let result;
-
     try {
-      result = JSON.parse(resultText);
-    } catch (err) {
-      skippedRows.push({
-        ...row,
-        reason: "Invalid JSON from Supabase",
-        raw: resultText,
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/inventory`, {
+        method: "POST",
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        },
+        body: JSON.stringify([
+          {
+            sku_code,
+            batch_no,
+            barcode,
+            date_in,
+            warranty_months: warranty_months ? parseInt(warranty_months) : null,
+          },
+        ]),
       });
-      continue;
-    }
 
-    if (insertRes.ok && Array.isArray(result) && result.length > 0) {
-      insertedRows.push(row);
-    } else {
-      skippedRows.push({
-        ...row,
-        reason: result.message || "Insert failed or returned empty array",
-        raw: resultText,
-      });
+      if (!res.ok) {
+        const error = await res.text();
+        skippedRows.push({ ...row, reason: `Supabase error: ${error}` });
+        continue;
+      }
+
+      const data = await res.json();
+      insertedRows.push(data[0]);
+    } catch (err) {
+      skippedRows.push({ ...row, reason: `Exception: ${err.message}` });
     }
   }
 
   return new Response(
-    JSON.stringify(
-      insertedRows.length
-        ? {
-            success: true,
-            inserted: insertedRows.length,
-            skipped_rows: skippedRows,
-          }
-        : {
-            error: "Insert failed",
-            skipped_rows: skippedRows,
-          }
-    ),
+    JSON.stringify({ inserted: insertedRows.length, skipped: skippedRows.length, skippedRows }),
     { headers: { "Content-Type": "application/json" } }
   );
 }
