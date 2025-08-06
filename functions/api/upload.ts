@@ -6,6 +6,7 @@ export async function onRequestPost(context) {
     const SUPABASE_URL = context.env.SUPABASE_URL;
     const SUPABASE_KEY = context.env.SUPABASE_SERVICE_ROLE_KEY;
 
+    // 🔍 Get sku_id from sku_code
     async function getSkuId(sku_code) {
       const url = `${SUPABASE_URL}/rest/v1/skus?sku_code=eq.${encodeURIComponent(sku_code)}&select=id&limit=1`;
       const res = await fetch(url, {
@@ -18,6 +19,7 @@ export async function onRequestPost(context) {
       return data[0]?.id || null;
     }
 
+    // 🔍 or ➕ Get/create batch_id from batch_no
     async function getOrCreateBatchId(batch_no) {
       const fetchUrl = `${SUPABASE_URL}/rest/v1/batches?batch_no=eq.${encodeURIComponent(batch_no)}&select=id&limit=1`;
       const fetchRes = await fetch(fetchUrl, {
@@ -32,6 +34,7 @@ export async function onRequestPost(context) {
         return fetchData[0].id;
       }
 
+      // ➕ Insert batch if not found
       const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/batches`, {
         method: "POST",
         headers: {
@@ -44,7 +47,14 @@ export async function onRequestPost(context) {
       });
 
       const insertData = await insertRes.json();
-      return insertData[0]?.id || null;
+
+      if (!insertRes.ok || !insertData[0]?.id) {
+        console.error("❌ Failed to create batch:", insertData);
+        return null;
+      }
+
+      console.log("🆕 Batch created:", insertData[0]);
+      return insertData[0].id;
     }
 
     const transformedRows = [];
@@ -55,6 +65,8 @@ export async function onRequestPost(context) {
 
       const sku_id = await getSkuId(sku_code);
       const batch_id = await getOrCreateBatchId(batch_no);
+
+      console.log("🔎 Lookup:", { sku_code, batch_no, sku_id, batch_id });
 
       if (!sku_id || !batch_id) {
         skippedRows.push({
@@ -75,6 +87,8 @@ export async function onRequestPost(context) {
         warranty_months: parseInt(warranty_months),
       });
     }
+
+    console.log(`📦 Prepared ${transformedRows.length} inventory rows.`);
 
     if (transformedRows.length === 0) {
       return new Response(
@@ -119,6 +133,7 @@ export async function onRequestPost(context) {
     );
 
   } catch (error) {
+    console.error("❌ Worker error:", error.message);
     return new Response(JSON.stringify({ error: error.message }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
