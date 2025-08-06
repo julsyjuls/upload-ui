@@ -11,29 +11,22 @@
         display: flex;
         flex-direction: column;
         align-items: center;
-        justify-content: center;
-        height: 100vh;
-        margin: 0;
+        padding: 2rem;
       }
 
       h1 {
         font-size: 2rem;
-        margin-bottom: 2rem;
+        margin-bottom: 1.5rem;
       }
 
       input[type="file"] {
         margin-bottom: 1rem;
-        background-color: #2a2a2a;
-        color: #fff;
-        padding: 0.5rem;
-        border-radius: 5px;
-        border: 1px solid #444;
       }
 
       button {
         background-color: #4caf50;
         color: white;
-        padding: 0.6rem 1.2rem;
+        padding: 0.5rem 1rem;
         border: none;
         border-radius: 5px;
         cursor: pointer;
@@ -45,8 +38,8 @@
       }
 
       #status {
-        margin-top: 1rem;
         font-weight: bold;
+        margin-bottom: 1rem;
       }
 
       .success {
@@ -57,14 +50,30 @@
         color: #ff5252;
       }
 
-      pre {
-        background-color: #2a2a2a;
-        padding: 1rem;
-        border-radius: 5px;
-        max-width: 600px;
+      table {
         width: 100%;
-        overflow-x: auto;
+        max-width: 700px;
+        border-collapse: collapse;
         margin-top: 1rem;
+      }
+
+      th, td {
+        border: 1px solid #555;
+        padding: 8px;
+        text-align: left;
+      }
+
+      th {
+        background-color: #333;
+      }
+
+      td {
+        background-color: #2a2a2a;
+      }
+
+      #previewTitle {
+        margin-top: 2rem;
+        font-size: 1.2rem;
       }
     </style>
   </head>
@@ -74,21 +83,23 @@
     <button id="uploadBtn">Upload</button>
 
     <div id="status"></div>
-    <pre id="result"></pre>
+    <div id="previewTitle"></div>
+    <table id="previewTable"></table>
 
     <script type="module">
       import Papa from "https://cdn.jsdelivr.net/npm/papaparse@5.4.1/+esm";
       import { SUPABASE_URL, SUPABASE_KEY } from "./upload.ts";
 
-      const csvFileInput = document.getElementById("csvFile");
+      const fileInput = document.getElementById("csvFile");
       const uploadBtn = document.getElementById("uploadBtn");
       const statusBox = document.getElementById("status");
-      const resultBox = document.getElementById("result");
+      const previewTable = document.getElementById("previewTable");
+      const previewTitle = document.getElementById("previewTitle");
 
       let file;
 
-      csvFileInput.addEventListener("change", (event) => {
-        file = event.target.files[0];
+      fileInput.addEventListener("change", (e) => {
+        file = e.target.files[0];
       });
 
       uploadBtn.addEventListener("click", async () => {
@@ -104,6 +115,35 @@
           complete: async function (results) {
             const rows = results.data;
 
+            // Preview
+            previewTitle.textContent = "📄 Preview (first 5 rows):";
+            const previewRows = rows.slice(0, 5);
+            const headers = Object.keys(previewRows[0]);
+
+            // Clear previous content
+            previewTable.innerHTML = "";
+
+            // Build table headers
+            const headerRow = document.createElement("tr");
+            headers.forEach((header) => {
+              const th = document.createElement("th");
+              th.textContent = header;
+              headerRow.appendChild(th);
+            });
+            previewTable.appendChild(headerRow);
+
+            // Add data rows
+            previewRows.forEach((row) => {
+              const tr = document.createElement("tr");
+              headers.forEach((header) => {
+                const td = document.createElement("td");
+                td.textContent = row[header] || "";
+                tr.appendChild(td);
+              });
+              previewTable.appendChild(tr);
+            });
+
+            // Upload
             const response = await fetch("./upload.ts", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -121,8 +161,6 @@
                 (result?.error?.message || response.statusText);
               statusBox.className = "error";
             }
-
-            resultBox.textContent = JSON.stringify(result, null, 2);
           },
         });
       });
