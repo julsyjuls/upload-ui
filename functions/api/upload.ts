@@ -6,7 +6,6 @@ export async function onRequestPost(context) {
     const SUPABASE_URL = context.env.SUPABASE_URL;
     const SUPABASE_KEY = context.env.SUPABASE_SERVICE_ROLE_KEY;
 
-    // 🔍 Get sku_id from sku_code
     async function getSkuId(sku_code) {
       const url = `${SUPABASE_URL}/rest/v1/skus?sku_code=eq.${encodeURIComponent(sku_code)}&select=id&limit=1`;
       const res = await fetch(url, {
@@ -19,7 +18,6 @@ export async function onRequestPost(context) {
       return data[0]?.id || null;
     }
 
-    // 🔍 or ➕ Get/create batch_id from batch_no
     async function getOrCreateBatchId(batch_no) {
       const fetchUrl = `${SUPABASE_URL}/rest/v1/batches?batch_no=eq.${encodeURIComponent(batch_no)}&select=id&limit=1`;
       const fetchRes = await fetch(fetchUrl, {
@@ -34,7 +32,6 @@ export async function onRequestPost(context) {
         return fetchData[0].id;
       }
 
-      // ➕ Insert batch if not found
       const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/batches`, {
         method: "POST",
         headers: {
@@ -47,11 +44,11 @@ export async function onRequestPost(context) {
       });
 
       const insertData = await insertRes.json();
-      console.log("🆕 Created batch:", insertData[0]);
       return insertData[0]?.id || null;
     }
 
     const transformedRows = [];
+    const skippedRows = [];
 
     for (const row of rows) {
       const { sku_code, batch_no, barcode, date_in, warranty_months } = row;
@@ -59,33 +56,37 @@ export async function onRequestPost(context) {
       const sku_id = await getSkuId(sku_code);
       const batch_id = await getOrCreateBatchId(batch_no);
 
-      console.log("🔎 Lookup Result:", { sku_code, sku_id, batch_no, batch_id });
-
       if (!sku_id || !batch_id) {
-        console.warn(`❌ Skipping row due to missing lookup:`, row);
+        skippedRows.push({
+          sku_code,
+          batch_no,
+          found_sku_id: sku_id,
+          found_batch_id: batch_id,
+          reason: !sku_id ? "Missing SKU" : "Missing Batch",
+        });
         continue;
       }
 
-      const finalRow = {
+      transformedRows.push({
         sku_id,
         batch_id,
         barcode,
         date_in,
         warranty_months: parseInt(warranty_months),
-      };
-
-      console.log("✅ Row ready to insert:", finalRow);
-
-      transformedRows.push(finalRow);
+      });
     }
 
-    console.log(`📦 Total rows ready for insert: ${transformedRows.length}`);
-
     if (transformedRows.length === 0) {
-      return new Response(JSON.stringify({ error: "No valid rows to insert." }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({
+          error: "No valid rows to insert.",
+          skipped_rows: skippedRows,
+        }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
     }
 
     const response = await fetch(`${SUPABASE_URL}/rest/v1/inventory`, {
@@ -100,23 +101,24 @@ export async function onRequestPost(context) {
     });
 
     const insertData = await response.json();
-    console.log("🧾 Insert response:", insertData);
 
     if (!response.ok) {
-      console.error("🧨 Supabase insert error:", insertData);
-      return new Response(JSON.stringify({ error: "Supabase insert failed", detail: insertData }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ error: "Supabase insert failed", detail: insertData }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
     }
 
-    return new Response(JSON.stringify({ message: "Upload successful", inserted: insertData.length }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({
+        message: "Upload successful",
+        inserted: insertData.length,
+        skipped_rows: skippedRows,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
 
   } catch (error) {
-    console.error("❌ Worker error:", error.message);
     return new Response(JSON.stringify({ error: error.message }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
