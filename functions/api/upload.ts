@@ -14,22 +14,7 @@ export async function onRequestPost(context) {
       continue;
     }
 
-    // Get SKU ID
-    const skuRes = await fetch(`${SUPABASE_URL}/rest/v1/skus?sku_code=eq.${sku_code}`, {
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-      },
-    });
-    const skuData = await skuRes.json();
-    const sku_id = skuData[0]?.id;
-
-    if (!sku_id) {
-      skippedRows.push({ ...row, reason: `No SKU found for code "${sku_code}"` });
-      continue;
-    }
-
-    // Insert into inventory (will trigger linking to batch and SKU)
+    // Insert into inventory — rely on trigger to resolve sku_id and batch_id
     const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/inventory`, {
       method: "POST",
       headers: {
@@ -40,7 +25,6 @@ export async function onRequestPost(context) {
       },
       body: JSON.stringify([
         {
-          sku_id,
           sku_code,
           batch_no,
           barcode,
@@ -50,11 +34,20 @@ export async function onRequestPost(context) {
       ]),
     });
 
-    const result = await insertRes.json();
+    const resultText = await insertRes.text();
+    let result;
+
+    try {
+      result = JSON.parse(resultText);
+    } catch (err) {
+      skippedRows.push({ ...row, reason: "Invalid JSON from Supabase", raw: resultText });
+      continue;
+    }
+
     if (insertRes.ok) {
       insertedRows.push(row);
     } else {
-      skippedRows.push({ ...row, reason: result.message || "Insert failed" });
+      skippedRows.push({ ...row, reason: result.message || "Insert failed", raw: resultText });
     }
   }
 
