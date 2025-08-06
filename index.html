@@ -2,12 +2,78 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>CSV Upload to Supabase</title>
+    <title>Upload Inventory CSV</title>
+    <style>
+      body {
+        background-color: #1e1e1e;
+        color: #fff;
+        font-family: 'Segoe UI', sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        margin: 0;
+      }
+
+      h1 {
+        font-size: 2rem;
+        margin-bottom: 2rem;
+      }
+
+      input[type="file"] {
+        margin-bottom: 1rem;
+        background-color: #2a2a2a;
+        color: #fff;
+        padding: 0.5rem;
+        border-radius: 5px;
+        border: 1px solid #444;
+      }
+
+      button {
+        background-color: #4caf50;
+        color: white;
+        padding: 0.6rem 1.2rem;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        margin-bottom: 1rem;
+      }
+
+      button:hover {
+        background-color: #45a049;
+      }
+
+      #status {
+        margin-top: 1rem;
+        font-weight: bold;
+      }
+
+      .success {
+        color: #00e676;
+      }
+
+      .error {
+        color: #ff5252;
+      }
+
+      pre {
+        background-color: #2a2a2a;
+        padding: 1rem;
+        border-radius: 5px;
+        max-width: 600px;
+        width: 100%;
+        overflow-x: auto;
+        margin-top: 1rem;
+      }
+    </style>
   </head>
   <body>
     <h1>Upload Inventory CSV</h1>
     <input type="file" id="csvFile" accept=".csv" />
     <button id="uploadBtn">Upload</button>
+
+    <div id="status"></div>
     <pre id="result"></pre>
 
     <script type="module">
@@ -16,6 +82,7 @@
 
       const csvFileInput = document.getElementById("csvFile");
       const uploadBtn = document.getElementById("uploadBtn");
+      const statusBox = document.getElementById("status");
       const resultBox = document.getElementById("result");
 
       let file;
@@ -26,7 +93,8 @@
 
       uploadBtn.addEventListener("click", async () => {
         if (!file) {
-          resultBox.textContent = "Please select a CSV file.";
+          statusBox.textContent = "❗ Please select a CSV file.";
+          statusBox.className = "error";
           return;
         }
 
@@ -36,7 +104,6 @@
           complete: async function (results) {
             const rows = results.data;
 
-            // Send to upload script
             const response = await fetch("./upload.ts", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -44,6 +111,17 @@
             });
 
             const result = await response.json();
+
+            if (response.ok && !result.error) {
+              statusBox.textContent = "✅ Upload successful!";
+              statusBox.className = "success";
+            } else {
+              statusBox.textContent =
+                "❌ Upload failed: " +
+                (result?.error?.message || response.statusText);
+              statusBox.className = "error";
+            }
+
             resultBox.textContent = JSON.stringify(result, null, 2);
           },
         });
