@@ -57,7 +57,9 @@
 </head>
 <body>
   <h2>Upload Inventory CSV</h2>
-  <p>Please upload a .csv file with the following columns:<br><code>sku_code, batch_no, barcode, date_in, warranty_months</code></p>
+  <p>Please upload a .csv file with the following columns:<br>
+    <code>sku_code, batch_no, barcode, date_in, warranty_months</code>
+  </p>
 
   <div id="dropZone" class="drop-zone">Drag and drop your CSV here or click to select</div>
 
@@ -140,11 +142,13 @@
       showMessage('Uploading...', '');
 
       try {
+        const formData = new FormData();
+        const blob = new Blob([Papa.unparse(parsedData)], { type: 'text/csv' });
+        formData.append('file', blob, 'data.csv');
 
         const response = await fetch('https://upload-ui.pages.dev/api/upload', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rows: parsedData })
+          body: formData
         });
 
         const result = await response.json();
@@ -162,4 +166,3 @@
   </script>
 </body>
 </html>
-
