@@ -1,5 +1,6 @@
 export const SUPABASE_URL = "https://idtwjchmeldqwurigvkx.supabase.co";
-export const SUPABASE_ANON_KEY = "sb_publishable_NXoYAsEV8RMXoVZggIeVAg_eGrfwnVb";
+export const SUPABASE_KEY = "sb_publishable_NXoYAsEV8RMXoVZggIeVAg_eGrfwnVb";
+
 
 export async function onRequestPost(context) {
   const { rows } = await context.request.json();
