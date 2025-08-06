@@ -37,15 +37,25 @@ export async function onRequestPost(context) {
       });
 
       if (!res.ok) {
-        const error = await res.text();
-        skippedRows.push({ ...row, reason: `Supabase error: ${error}` });
+        const errorText = await res.text();
+        let reason = `❌ Supabase error`;
+
+        if (errorText.includes("inventory_barcode_key")) {
+          reason = `❌ Barcode "${barcode}" already exists in inventory`;
+        } else if (errorText.includes("not found in skus") || sku_code === "EMP-NONE") {
+          reason = `❌ SKU code "${sku_code}" not found in SKUs table`;
+        } else {
+          reason = `❌ Supabase error: ${errorText}`;
+        }
+
+        skippedRows.push({ ...row, reason });
         continue;
       }
 
       const data = await res.json();
       insertedRows.push(data[0]);
     } catch (err) {
-      skippedRows.push({ ...row, reason: `Exception: ${err.message}` });
+      skippedRows.push({ ...row, reason: `❌ Exception: ${err.message}` });
     }
   }
 
