@@ -1,49 +1,55 @@
-import Papa from 'https://cdn.skypack.dev/papaparse';
+import { parse } from 'https://cdn.skypack.dev/papaparse';
 
-export async function onRequestPost(context: any) {
-  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = context.env
-  const body = await context.request.text()
+export async function onRequestPost(context) {
+  try {
+    const formData = await context.request.formData();
+    const file = formData.get('file');
 
-  const parsed = Papa.parse(body, {
-    header: true,
-    skipEmptyLines: true,
-  })
+    if (!file) {
+      return new Response(JSON.stringify({ error: 'No file uploaded' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
 
-  const data = parsed.data as {
-    sku_code: string
-    batch_no: string
-    barcode: string
-    date_in: string
-    warranty_months: string
-  }[]
+    const text = await file.text();
+    const parsed = parse(text, {
+      header: true,
+      skipEmptyLines: true,
+    });
 
-  const insertedSKUs = new Set()
-  const insertedBatches = new Set()
+    const rows = parsed.data;
 
-  const results = []
+    const SUPABASE_URL = context.env.SUPABASE_URL;
+    const SUPABASE_KEY = context.env.SUPABASE_ANON_KEY;
 
-  for (const row of data) {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/create_inventory_with_batch_and_sku`, {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/inventory_upload_buffer`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        apikey: SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Prefer': 'resolution=merge-duplicates',
       },
-      body: JSON.stringify({
-        sku_code: row.sku_code,
-        batch_no: row.batch_no,
-        barcode: row.barcode,
-        date_in: row.date_in,
-        warranty_months: parseInt(row.warranty_months),
-      }),
-    })
+      body: JSON.stringify(rows),
+    });
 
-    const json = await res.json()
-    results.push({ status: res.status, data: json })
+    if (!response.ok) {
+      const errorText = await response.text();
+      return new Response(JSON.stringify({ error: 'Supabase error', detail: errorText }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response(JSON.stringify({ message: 'Upload successful' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
-
-  return new Response(JSON.stringify({ results }), {
-    headers: { 'Content-Type': 'application/json' },
-  })
 }
