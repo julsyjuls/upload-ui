@@ -1,10 +1,10 @@
-import { parse } from 'papaparse'
+import Papa from 'https://cdn.skypack.dev/papaparse'
 
 export async function onRequestPost(context: any) {
   const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = context.env
   const body = await context.request.text()
 
-  const parsed = parse(body, {
+  const parsed = Papa.parse(body, {
     header: true,
     skipEmptyLines: true,
   })
