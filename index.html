@@ -52,6 +52,7 @@
   <div id="drop-area">Drag and drop your CSV here or click to select</div>
   <div id="message"></div>
   <div id="preview"></div>
+  <div id="errors" style="margin-top: 1rem;"></div>
   <button id="uploadBtn">Upload to Supabase</button>
 
   <input type="file" id="fileElem" accept=".csv" style="display:none" />
@@ -62,11 +63,33 @@
     const preview = document.getElementById('preview');
     const message = document.getElementById('message');
     const uploadBtn = document.getElementById('uploadBtn');
+    const errorsDiv = document.getElementById('errors');
     let parsedData = [];
 
     function showMessage(text, type) {
       message.textContent = text;
       message.className = type;
+    }
+
+    function showErrors(skippedRows) {
+      if (!skippedRows || skippedRows.length === 0) {
+        errorsDiv.innerHTML = '';
+        return;
+      }
+
+      let html = '<h3>Skipped Rows:</h3><table><thead><tr>';
+      const keys = Object.keys(skippedRows[0]);
+      keys.forEach(key => html += `<th>${key}</th>`);
+      html += '</tr></thead><tbody>';
+
+      skippedRows.forEach(row => {
+        html += '<tr>';
+        keys.forEach(key => html += `<td>${row[key]}</td>`);
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+
+      errorsDiv.innerHTML = html;
     }
 
     dropArea.addEventListener('click', () => fileElem.click());
@@ -130,6 +153,7 @@
 
         preview.innerHTML = '';
         preview.appendChild(table);
+        errorsDiv.innerHTML = '';
       };
       reader.readAsText(file);
     }
@@ -137,6 +161,7 @@
     uploadBtn.addEventListener('click', async () => {
       uploadBtn.disabled = true;
       showMessage('Uploading...', '');
+      errorsDiv.innerHTML = '';
 
       try {
         const response = await fetch('https://upload-ui.pages.dev/api/upload', {
@@ -155,11 +180,13 @@
           return;
         }
 
-        if (response.ok) {
-          showMessage(`Upload successful! ${result.message || ''}`, 'success');
+        if (response.ok && result.inserted > 0) {
+          showMessage(`✅ Upload complete: ${result.inserted} added, ${result.skipped} skipped`, 'success');
         } else {
-          showMessage(`Upload failed: ${result.error || 'Unknown error'}`, 'error');
+          showMessage(`⚠️ Upload processed: ${result.inserted} added, ${result.skipped} skipped`, 'error');
         }
+
+        showErrors(result.skippedRows);
       } catch (err) {
         showMessage('Error uploading data: ' + err.message, 'error');
       } finally {
