@@ -44,6 +44,14 @@
   </style>
 </head>
 <body>
+  <script>
+    const password = prompt("Enter password to access the upload tool:");
+    if (password !== "safebatch2025") {
+      alert("Access denied.");
+      document.body.innerHTML = "<h2>🚫 Unauthorized</h2>";
+    }
+  </script>
+
   <h2>Upload Inventory CSV</h2>
   <p>Please upload a .csv file with the following columns:<br>
     <code>sku_code, batch_no, barcode, date_in, warranty_months</code>
