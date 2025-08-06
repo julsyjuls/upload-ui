@@ -1,6 +1,8 @@
+export const SUPABASE_URL = "https://idtwjchmeldqwurigvkx.supabase.co";
+
 export async function onRequestPost(context) {
-  const SUPABASE_URL = context.env.SUPABASE_URL;
-  const SUPABASE_KEY = context.env.SUPABASE_KEY;
+  const { SUPABASE_SERVICE_ROLE_KEY } = context.env;
+  const SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY;
 
   const { rows } = await context.request.json();
   const insertedRows = [];
