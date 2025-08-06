@@ -1,170 +1,53 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Upload Inventory CSV</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 2rem;
-    }
+  <head>
+    <meta charset="UTF-8" />
+    <title>CSV Upload to Supabase</title>
+  </head>
+  <body>
+    <h1>Upload Inventory CSV</h1>
+    <input type="file" id="csvFile" accept=".csv" />
+    <button id="uploadBtn">Upload</button>
+    <pre id="result"></pre>
 
-    #drop-area {
-      border: 2px dashed #999;
-      padding: 2rem;
-      text-align: center;
-      margin-bottom: 1rem;
-    }
+    <script type="module">
+      import Papa from "https://cdn.jsdelivr.net/npm/papaparse@5.4.1/+esm";
+      import { SUPABASE_URL, SUPABASE_KEY } from "./upload.ts";
 
-    table {
-      border-collapse: collapse;
-      width: 100%;
-    }
+      const csvFileInput = document.getElementById("csvFile");
+      const uploadBtn = document.getElementById("uploadBtn");
+      const resultBox = document.getElementById("result");
 
-    th, td {
-      border: 1px solid #ccc;
-      padding: 8px;
-    }
+      let file;
 
-    #message {
-      margin-bottom: 1rem;
-      color: red;
-    }
+      csvFileInput.addEventListener("change", (event) => {
+        file = event.target.files[0];
+      });
 
-    .success {
-      color: green;
-    }
-
-    .error {
-      color: red;
-    }
-  </style>
-</head>
-<body>
-  <h2>Upload Inventory CSV</h2>
-  <p>Please upload a .csv file with the following columns:<br>
-    <code>sku_code, batch_no, barcode, date_in, warranty_months</code>
-  </p>
-
-  <div id="drop-area">Drag and drop your CSV here or click to select</div>
-  <div id="message"></div>
-  <div id="preview"></div>
-  <button id="uploadBtn">Upload to Supabase</button>
-
-  <input type="file" id="fileElem" accept=".csv" style="display:none" />
-
-  <script>
-    const dropArea = document.getElementById('drop-area');
-    const fileElem = document.getElementById('fileElem');
-    const preview = document.getElementById('preview');
-    const message = document.getElementById('message');
-    const uploadBtn = document.getElementById('uploadBtn');
-    let parsedData = [];
-
-    function showMessage(text, type) {
-      message.textContent = text;
-      message.className = type;
-    }
-
-    dropArea.addEventListener('click', () => fileElem.click());
-
-    dropArea.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      dropArea.style.backgroundColor = '#eee';
-    });
-
-    dropArea.addEventListener('dragleave', () => {
-      dropArea.style.backgroundColor = '';
-    });
-
-    dropArea.addEventListener('drop', (e) => {
-      e.preventDefault();
-      dropArea.style.backgroundColor = '';
-      const file = e.dataTransfer.files[0];
-      handleFile(file);
-    });
-
-    fileElem.addEventListener('change', (e) => {
-      const file = e.target.files[0];
-      handleFile(file);
-    });
-
-    function handleFile(file) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const lines = reader.result.trim().split('\n');
-        const headers = lines[0].split(',').map(h => h.trim());
-        parsedData = lines.slice(1).map(line => {
-          const values = line.split(',').map(v => v.trim());
-          const obj = {};
-          headers.forEach((h, i) => obj[h] = values[i]);
-          return obj;
-        });
-
-        // Show preview table
-        const table = document.createElement('table');
-        const thead = document.createElement('thead');
-        const tr = document.createElement('tr');
-        headers.forEach(h => {
-          const th = document.createElement('th');
-          th.textContent = h;
-          tr.appendChild(th);
-        });
-        thead.appendChild(tr);
-        table.appendChild(thead);
-
-        const tbody = document.createElement('tbody');
-        parsedData.forEach(row => {
-          const tr = document.createElement('tr');
-          headers.forEach(h => {
-            const td = document.createElement('td');
-            td.textContent = row[h];
-            tr.appendChild(td);
-          });
-          tbody.appendChild(tr);
-        });
-        table.appendChild(tbody);
-
-        preview.innerHTML = '';
-        preview.appendChild(table);
-      };
-      reader.readAsText(file);
-    }
-
-    uploadBtn.addEventListener('click', async () => {
-      uploadBtn.disabled = true;
-      showMessage('Uploading...', '');
-
-      try {
-        const response = await fetch('https://upload-ui.pages.dev/api/upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rows: parsedData }),
-        });
-
-        const text = await response.text(); // ⬅️ Grab raw text first
-
-        let result;
-        try {
-          result = JSON.parse(text); // ⬅️ Try to parse only if it's valid JSON
-        } catch (err) {
-          showMessage('Upload failed: Invalid JSON response', 'error');
-          console.error('🧨 Raw response:', text);
+      uploadBtn.addEventListener("click", async () => {
+        if (!file) {
+          resultBox.textContent = "Please select a CSV file.";
           return;
         }
 
-        if (response.ok) {
-          showMessage(`Upload successful! ${result.message || ''}`, 'success');
-        } else {
-          showMessage(`Upload failed: ${result.error || 'Unknown error'}`, 'error');
-        }
-      } catch (err) {
-        showMessage('Error uploading data: ' + err.message, 'error');
-      } finally {
-        uploadBtn.disabled = false;
-      }
-    });
-  </script>
-</body>
+        Papa.parse(file, {
+          header: true,
+          skipEmptyLines: true,
+          complete: async function (results) {
+            const rows = results.data;
+
+            // Send to upload script
+            const response = await fetch("./upload.ts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ rows }),
+            });
+
+            const result = await response.json();
+            resultBox.textContent = JSON.stringify(result, null, 2);
+          },
+        });
+      });
+    </script>
+  </body>
 </html>
