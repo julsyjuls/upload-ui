@@ -45,7 +45,9 @@ export async function onRequestPost(context) {
         },
         body: JSON.stringify([{ batch_no }]),
       });
+
       const insertData = await insertRes.json();
+      console.log("🆕 Created batch:", insertData[0]);
       return insertData[0]?.id || null;
     }
 
@@ -57,21 +59,34 @@ export async function onRequestPost(context) {
       const sku_id = await getSkuId(sku_code);
       const batch_id = await getOrCreateBatchId(batch_no);
 
+      console.log("🔎 Lookup Result:", { sku_code, sku_id, batch_no, batch_id });
+
       if (!sku_id || !batch_id) {
-        console.warn(`❌ Missing SKU or Batch:`, { sku_code, batch_no });
-        continue; // Skip this row
+        console.warn(`❌ Skipping row due to missing lookup:`, row);
+        continue;
       }
 
-      transformedRows.push({
+      const finalRow = {
         sku_id,
         batch_id,
         barcode,
         date_in,
-        warranty_months: parseInt(warranty_months), // 🔢 make sure it's an integer
-      });
+        warranty_months: parseInt(warranty_months),
+      };
+
+      console.log("✅ Row ready to insert:", finalRow);
+
+      transformedRows.push(finalRow);
     }
 
-    console.log(`✅ Ready to insert ${transformedRows.length} inventory rows.`);
+    console.log(`📦 Total rows ready for insert: ${transformedRows.length}`);
+
+    if (transformedRows.length === 0) {
+      return new Response(JSON.stringify({ error: "No valid rows to insert." }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
     const response = await fetch(`${SUPABASE_URL}/rest/v1/inventory`, {
       method: "POST",
@@ -79,21 +94,23 @@ export async function onRequestPost(context) {
         "Content-Type": "application/json",
         apikey: SUPABASE_KEY,
         Authorization: `Bearer ${SUPABASE_KEY}`,
-        Prefer: "resolution=merge-duplicates",
+        Prefer: "return=representation",
       },
       body: JSON.stringify(transformedRows),
     });
 
+    const insertData = await response.json();
+    console.log("🧾 Insert response:", insertData);
+
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error("🧨 Supabase error response:", errorText);
-      return new Response(JSON.stringify({ error: "Supabase error", detail: errorText }), {
+      console.error("🧨 Supabase insert error:", insertData);
+      return new Response(JSON.stringify({ error: "Supabase insert failed", detail: insertData }), {
         status: 500,
         headers: { "Content-Type": "application/json" },
       });
     }
 
-    return new Response(JSON.stringify({ message: "Upload successful" }), {
+    return new Response(JSON.stringify({ message: "Upload successful", inserted: insertData.length }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
