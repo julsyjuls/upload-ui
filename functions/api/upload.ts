@@ -21,7 +21,7 @@ export async function onRequestPost(context) {
     const rows = parsed.data;
 
     const SUPABASE_URL = context.env.SUPABASE_URL;
-    const SUPABASE_KEY = context.env.SUPABASE_ANON_KEY;
+    const SUPABASE_KEY = context.env.SUPABASE_SERVICE_ROLE_KEY;
 
     const response = await fetch(`${SUPABASE_URL}/rest/v1/inventory_upload_buffer`, {
       method: 'POST',
