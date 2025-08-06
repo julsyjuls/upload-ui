@@ -1,4 +1,4 @@
-import Papa from 'https://cdn.skypack.dev/papaparse'
+import Papa from 'https://cdn.skypack.dev/papaparse';
 
 export async function onRequestPost(context: any) {
   const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = context.env
