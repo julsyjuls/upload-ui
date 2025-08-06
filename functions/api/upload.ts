@@ -1,7 +1,7 @@
-export const SUPABASE_URL = "https://idtwjchmeldqwurigvkx.supabase.co";
-export const SUPABASE_KEY = "sb_publishable_NXoYAsEV8RMXoVZggIeVAg_eGrfwnVb";
-
 export async function onRequestPost(context) {
+  const SUPABASE_URL = context.env.SUPABASE_URL;
+  const SUPABASE_KEY = context.env.SUPABASE_KEY;
+
   const { rows } = await context.request.json();
   const insertedRows = [];
   const skippedRows = [];
@@ -48,7 +48,11 @@ export async function onRequestPost(context) {
   }
 
   return new Response(
-    JSON.stringify({ inserted: insertedRows.length, skipped: skippedRows.length, skippedRows }),
+    JSON.stringify({
+      inserted: insertedRows.length,
+      skipped: skippedRows.length,
+      skippedRows,
+    }),
     { headers: { "Content-Type": "application/json" } }
   );
 }
