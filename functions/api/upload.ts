@@ -1,88 +1,71 @@
+export const SUPABASE_URL = "https://YOUR_PROJECT.supabase.co";
+export const SUPABASE_KEY = "sbp_xxx..."; // your anon/public key
+
 export async function onRequestPost(context) {
-  try {
-    const body = await context.request.json();
-    const rows = body.rows;
+  const { rows } = await context.request.json();
+  const insertedRows = [];
+  const skippedRows = [];
 
-    const SUPABASE_URL = context.env.SUPABASE_URL;
-    const SUPABASE_KEY = context.env.SUPABASE_SERVICE_ROLE_KEY;
+  for (const row of rows) {
+    const { sku_code, batch_no, barcode, date_in, warranty_months } = row;
 
-    async function getSkuId(sku_code) {
-      const url = `${SUPABASE_URL}/rest/v1/skus?sku_code=eq.${encodeURIComponent(sku_code)}&select=id&limit=1`;
-      const res = await fetch(url, {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`,
-        },
-      });
-      const data = await res.json();
-      return data[0]?.id || null;
+    if (!sku_code || !batch_no || !barcode || !date_in) {
+      skippedRows.push({ ...row, reason: "Missing required field(s)" });
+      continue;
     }
 
-    const transformedRows = [];
-    const skippedRows = [];
+    // Get SKU ID
+    const skuRes = await fetch(`${SUPABASE_URL}/rest/v1/skus?sku_code=eq.${sku_code}`, {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+      },
+    });
+    const skuData = await skuRes.json();
+    const sku_id = skuData[0]?.id;
 
-    for (const row of rows) {
-      const { sku_code, batch_no, barcode, date_in, warranty_months } = row;
-
-      const sku_id = await getSkuId(sku_code);
-
-      if (!sku_id) {
-        skippedRows.push({
-          sku_code,
-          batch_no,
-          reason: "Missing SKU",
-        });
-        continue;
-      }
-
-      transformedRows.push({
-        sku_id,
-        batch_no, // just text
-        barcode,
-        date_in,
-        warranty_months: parseInt(warranty_months),
-      });
+    if (!sku_id) {
+      skippedRows.push({ ...row, reason: `No SKU found for code "${sku_code}"` });
+      continue;
     }
 
-    if (transformedRows.length === 0) {
-      return new Response(
-        JSON.stringify({ error: "No valid rows to insert", skipped_rows: skippedRows }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/inventory`, {
+    // Insert into inventory (will trigger linking to batch and SKU)
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/inventory`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         apikey: SUPABASE_KEY,
         Authorization: `Bearer ${SUPABASE_KEY}`,
-        Prefer: "return=representation",
+        Prefer: "resolution=merge-duplicates",
       },
-      body: JSON.stringify(transformedRows),
+      body: JSON.stringify([
+        {
+          sku_id,
+          sku_code,
+          batch_no,
+          barcode,
+          date_in,
+          warranty_months: warranty_months ? parseInt(warranty_months) : null,
+        },
+      ]),
     });
 
-    const result = await response.json();
-
-    if (!response.ok) {
-      return new Response(JSON.stringify({ error: "Insert failed", detail: result }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
+    const result = await insertRes.json();
+    if (insertRes.ok) {
+      insertedRows.push(row);
+    } else {
+      skippedRows.push({ ...row, reason: result.message || "Insert failed" });
     }
-
-    return new Response(
-      JSON.stringify({
-        message: "Upload successful",
-        inserted: result.length,
-        skipped_rows: skippedRows,
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
-  } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
   }
+
+  return new Response(
+    JSON.stringify(
+      insertedRows.length
+        ? { success: true, inserted: insertedRows.length, skipped_rows: skippedRows }
+        : { error: "Insert failed", skipped_rows: skippedRows },
+      null,
+      2
+    ),
+    { headers: { "Content-Type": "application/json" } }
+  );
 }
