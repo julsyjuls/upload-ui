@@ -21,7 +21,7 @@ export async function onRequestPost(context) {
         "Content-Type": "application/json",
         apikey: SUPABASE_KEY,
         Authorization: `Bearer ${SUPABASE_KEY}`,
-        Prefer: "resolution=merge-duplicates",
+        Prefer: "return=representation", // <— return inserted data
       },
       body: JSON.stringify([
         {
@@ -40,22 +40,37 @@ export async function onRequestPost(context) {
     try {
       result = JSON.parse(resultText);
     } catch (err) {
-      skippedRows.push({ ...row, reason: "Invalid JSON from Supabase", raw: resultText });
+      skippedRows.push({
+        ...row,
+        reason: "Invalid JSON from Supabase",
+        raw: resultText,
+      });
       continue;
     }
 
-    if (insertRes.ok) {
+    if (insertRes.ok && Array.isArray(result) && result.length > 0) {
       insertedRows.push(row);
     } else {
-      skippedRows.push({ ...row, reason: result.message || "Insert failed", raw: resultText });
+      skippedRows.push({
+        ...row,
+        reason: result.message || "Insert failed or returned empty array",
+        raw: resultText,
+      });
     }
   }
 
   return new Response(
     JSON.stringify(
       insertedRows.length
-        ? { success: true, inserted: insertedRows.length, skipped_rows: skippedRows }
-        : { error: "Insert failed", skipped_rows: skippedRows }
+        ? {
+            success: true,
+            inserted: insertedRows.length,
+            skipped_rows: skippedRows,
+          }
+        : {
+            error: "Insert failed",
+            skipped_rows: skippedRows,
+          }
     ),
     { headers: { "Content-Type": "application/json" } }
   );
