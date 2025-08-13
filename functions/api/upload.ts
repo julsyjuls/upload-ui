@@ -35,7 +35,7 @@ export async function onRequestPost(context) {
 
     const data = await fetchJson(url);
     skuCache.set(key, data);
-    return data as Array<{ id: number; sku_code: string; brand_name: string }>;
+    return data as Array<{ id: string; sku_code: string; brand_name: string }>;
   }
 
   // Optional helpers for friendlier “what’s wrong” messages
@@ -116,7 +116,7 @@ export async function onRequestPost(context) {
         continue;
       }
 
-      // Proceed with insert (keep your existing insert shape — triggers handle sku_id)
+      // Proceed with insert (Option B): send brand_name so trigger can resolve sku_id by BOTH fields
       const res = await fetch(`${SUPABASE_URL}/rest/v1/inventory`, {
         method: "POST",
         headers: {
@@ -127,11 +127,14 @@ export async function onRequestPost(context) {
         },
         body: JSON.stringify([
           {
-            sku_code, // unchanged shape
+            sku_code,           // keep for reference
+            brand_name,         // 👈 REQUIRED so the trigger can match by both
             batch_no,
             barcode,
             date_in,
             warranty_months: warranty_months ? parseInt(String(warranty_months)) : null,
+            // If you ever want to bypass trigger resolution and set directly:
+            // sku_id: skuMatches[0].id,
           },
         ]),
       });
@@ -142,8 +145,9 @@ export async function onRequestPost(context) {
 
         if (errorText.includes("inventory_barcode_key")) {
           reason = `❌ Barcode "${barcode}" already exists in inventory`;
+        } else if (errorText.includes("brand_name is NULL")) {
+          reason = `❌ brand_name is missing in payload (inventory insert).`;
         } else if (errorText.includes("not found in skus") || sku_code === "EMP-NONE") {
-          // Keep prior logic in case your trigger returns this
           reason = `❌ SKU code "${sku_code}" not found in SKUs table`;
         } else {
           reason = `❌ Supabase error: ${errorText}`;
