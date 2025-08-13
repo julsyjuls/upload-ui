@@ -15,6 +15,7 @@
       padding: 2rem;
       text-align: center;
       margin-bottom: 1rem;
+      cursor: pointer;
     }
 
     table {
@@ -73,6 +74,13 @@
       color: red;
       margin-top: 0.5rem;
     }
+
+    #note {
+      background: #f9f9f9;
+      border: 1px solid #eee;
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+    }
   </style>
 </head>
 <body>
@@ -86,8 +94,9 @@
   </div>
 
   <h2>Upload Inventory CSV</h2>
-  <p>Please upload a .csv file with the following columns:<br>
-    <code>sku_code, batch_no, barcode, date_in, warranty_months</code>
+  <p id="note">
+    Please upload a <code>.csv</code> with the following columns (exact, case-sensitive, spaces matter):<br/>
+    <code>sku_code, brand_name, batch_no, barcode, date_in, warranty_months</code>
   </p>
 
   <div id="drop-area">Drag and drop your CSV here or click to select</div>
@@ -179,6 +188,13 @@
           const values = line.split(',').map(v => v.trim());
           const obj = {};
           headers.forEach((h, i) => obj[h] = values[i]);
+          // minimal cleanup
+          if (obj.sku_code) obj.sku_code = obj.sku_code.trim();
+          if (obj.brand_name) obj.brand_name = obj.brand_name.trim();
+          if (obj.batch_no) obj.batch_no = obj.batch_no.trim();
+          if (obj.barcode) obj.barcode = obj.barcode.trim();
+          if (obj.date_in) obj.date_in = obj.date_in.trim();
+          if (obj.warranty_months) obj.warranty_months = obj.warranty_months.trim();
           return obj;
         });
 
@@ -199,7 +215,7 @@
           const tr = document.createElement('tr');
           headers.forEach(h => {
             const td = document.createElement('td');
-            td.textContent = row[h];
+            td.textContent = row[h] ?? '';
             tr.appendChild(td);
           });
           tbody.appendChild(tr);
@@ -222,6 +238,7 @@
         const response = await fetch('https://upload-ui.pages.dev/api/upload', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          // Now expecting brand_name too
           body: JSON.stringify({ rows: parsedData }),
         });
 
