@@ -1,12 +1,12 @@
-// upload.ts — Batched CSV upload (chunked preloads + aliases + DD/MM/YYYY + legacy keys)
+// upload.ts — Batched CSV upload with chunked preloads, CORS, and legacy UI keys
 
 export const SUPABASE_URL = "https://idtwjchmeldqwurigvkx.supabase.co";
 
 // ---------- tunables ----------
-const INVENTORY_CHUNK_SIZE = 400;   // ~300–500 is safe
-const MAX_SKIPPED_RETURN = 200;     // cap the verbose skipped list
-const SKU_IN_CHUNK = 150;           // chunk size for sku_code IN-list preloads
-const BATCH_IN_CHUNK = 150;         // chunk size for batch_no IN-list preloads
+const INVENTORY_CHUNK_SIZE = 400;
+const MAX_SKIPPED_RETURN = 200;
+const SKU_IN_CHUNK = 150;
+const BATCH_IN_CHUNK = 150;
 // --------------------------------
 
 type RawRow = {
@@ -28,20 +28,44 @@ type NormalizedRow = {
   __rowIndex: number;
 };
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  "Content-Type": "application/json",
+};
+
+export async function onRequestOptions() {
+  // CORS preflight
+  return new Response(JSON.stringify({ ok: true, added: 0, addedCount: 0, skipped: 0 }), {
+    status: 204,
+    headers: CORS_HEADERS,
+  });
+}
+
 export async function onRequestPost(context: any) {
   const { SUPABASE_SERVICE_ROLE_KEY } = context.env;
   const SB_KEY = SUPABASE_SERVICE_ROLE_KEY as string;
 
-  // counters kept in outer scope so json() can always include them
+  // counters in outer scope so every early-return still has UI keys
   let insertedCount = 0;
   const skipped: any[] = [];
 
   try {
     if (!SB_KEY) return json({ error: "Missing SUPABASE_SERVICE_ROLE_KEY" }, 500, { insertedCount, skippedArr: skipped });
 
-    const body = await context.request.json();
+    // Parse body safely (some clients send text accidentally)
+    let body: any = null;
+    try {
+      body = await context.request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400, { insertedCount, skippedArr: skipped });
+    }
+
     const inputRows: RawRow[] = Array.isArray(body?.rows) ? body.rows : [];
-    if (!inputRows.length) return json({ error: "No rows provided" }, 400, { insertedCount, skippedArr: skipped });
+    if (!inputRows.length) {
+      return json({ error: "No rows provided (expected { rows: [...] })" }, 400, { insertedCount, skippedArr: skipped });
+    }
 
     // ---------- Normalize & basic validation ----------
     const rows: NormalizedRow[] = [];
@@ -70,16 +94,14 @@ export async function onRequestPost(context: any) {
     }
 
     if (!rows.length) {
-      return json({
-        note: "All rows skipped due to missing required fields",
-      }, 200, { insertedCount, skippedArr: skipped });
+      return json({ note: "All rows skipped due to missing required fields" }, 200, { insertedCount, skippedArr: skipped });
     }
 
-    // ---------- Build sets for bulk lookups ----------
+    // ---------- Build sets ----------
     const skuCodes = new Set(rows.map((r) => r.sku_code));
     const batchKeys = new Set(rows.map((r) => keyBatch(r.sku_code, r.brand_name, r.batch_no)));
 
-    // earliest date_in per (sku|brand|batch) – optional metadata for batches
+    // earliest date_in per (sku|brand|batch) for batches metadata
     const batchEarliestDateIn = new Map<string, string>();
     for (const r of rows) {
       const bk = keyBatch(r.sku_code, r.brand_name, r.batch_no);
@@ -100,7 +122,7 @@ export async function onRequestPost(context: any) {
       return res.json();
     };
 
-    // ---------- 1) Preload SKUs (chunked by sku_code ONLY to keep URLs short) ----------
+    // ---------- 1) Preload SKUs (chunked by sku_code to avoid long URLs) ----------
     const skuCodesArr = [...skuCodes];
     const skus: Array<{ id: string; sku_code: string; brand_name: string }> = [];
 
@@ -112,7 +134,7 @@ export async function onRequestPost(context: any) {
       if (Array.isArray(page)) skus.push(...page);
     }
 
-    // Map exact (sku_code|brand_name)
+    // exact (sku_code|brand_name)
     const skuMap = new Map<string, { id: string; sku_code: string; brand_name: string }>();
     for (const s of skus) skuMap.set(keySku(s.sku_code, s.brand_name), s);
 
@@ -129,12 +151,10 @@ export async function onRequestPost(context: any) {
     }
 
     if (!usableRows.length) {
-      return json({
-        note: "All rows skipped due to missing SKUs",
-      }, 200, { insertedCount, skippedArr: skipped });
+      return json({ note: "All rows skipped due to missing SKUs" }, 200, { insertedCount, skippedArr: skipped });
     }
 
-    // ---------- 2) Preload batches (chunked by batch_no ONLY; filter by sku_id client-side) ----------
+    // ---------- 2) Preload batches (chunked by batch_no; filter by sku_id client-side) ----------
     const batchNosArr = [...new Set(usableRows.map((r) => r.batch_no))];
     let batches: Array<{ id: string; sku_id: string; batch_no: string }> = [];
 
@@ -215,9 +235,7 @@ export async function onRequestPost(context: any) {
     }
 
     if (!inventoryPayload.length) {
-      return json({
-        note: "Nothing to insert after resolving SKUs/Batches.",
-      }, 200, { insertedCount, skippedArr: skipped });
+      return json({ note: "Nothing to insert after resolving SKUs/Batches." }, 200, { insertedCount, skippedArr: skipped });
     }
 
     // ---------- 5) Chunked bulk insert into inventory ----------
@@ -261,9 +279,8 @@ export async function onRequestPost(context: any) {
       }
     }
 
-    // ---------- 6) Respond (legacy + detailed) ----------
+    // ---------- 6) Respond ----------
     return json({
-      // additional stats
       inserted: insertedCount,
       duplicates_skipped: duplicateCount,
       skippedRows: skipped.slice(0, MAX_SKIPPED_RETURN),
@@ -278,12 +295,7 @@ export async function onRequestPost(context: any) {
 
 // ---------------- helpers ----------------
 
-/**
- * Always include UI fields:
- * - added / addedCount
- * - skipped
- * - (plus anything in payload)
- */
+/** Always include UI fields + CORS headers */
 function json(payload: any = {}, status = 200, counters?: { insertedCount?: number, skippedArr?: any[] }) {
   const inserted = counters?.insertedCount ?? 0;
   const skippedArr = counters?.skippedArr ?? [];
@@ -297,7 +309,7 @@ function json(payload: any = {}, status = 200, counters?: { insertedCount?: numb
   };
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: CORS_HEADERS,
   });
 }
 
