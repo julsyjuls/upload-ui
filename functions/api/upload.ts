@@ -217,32 +217,49 @@ export async function onRequestPost(context: any) {
       });
     }
 
-    // ---------- 5) Chunked bulk insert into inventory ----------
-    let insertedCount = 0;
-    let duplicateCount = 0;
+// ---------- 5) Chunked bulk insert into inventory ----------
+let insertedCount = 0;
+let duplicateCount = 0;
 
-    for (let i = 0; i < inventoryPayload.length; i += INVENTORY_CHUNK_SIZE) {
-      const chunk = inventoryPayload.slice(i, i + INVENTORY_CHUNK_SIZE);
+for (let i = 0; i < inventoryPayload.length; i += INVENTORY_CHUNK_SIZE) {
+  const chunk = inventoryPayload.slice(i, i + INVENTORY_CHUNK_SIZE);
 
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/inventory?on_conflict=barcode`, {
-        method: "POST",
-        headers: { ...baseHeaders, Prefer: "resolution=ignore-duplicates,return=representation" },
-        body: JSON.stringify(chunk),
-      });
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/inventory?on_conflict=barcode`, {
+    method: "POST",
+    headers: { ...baseHeaders, Prefer: "resolution=ignore-duplicates,return=representation" },
+    body: JSON.stringify(chunk),
+  });
 
-      if (!res.ok) {
-        const err = await safeText(res);
-        for (const bad of chunk) {
-          skipped.push({ ...bad, reason: `❌ Supabase error (bulk insert): ${truncate(err, 300)}` });
-        }
-        continue;
-      }
-
-      const data = await res.json();
-      const inserted = Array.isArray(data) ? data.length : 0;
-      insertedCount += inserted;
-      duplicateCount += chunk.length - inserted;
+  if (!res.ok) {
+    const err = await safeText(res);
+    for (const bad of chunk) {
+      skipped.push({ ...bad, reason: `❌ Supabase error (bulk insert): ${truncate(err, 300)}` });
     }
+    continue;
+  }
+
+  // Rows returned = actually inserted (duplicates omitted by PostgREST)
+  const data = await res.json();
+  const inserted = Array.isArray(data) ? data.length : 0;
+  insertedCount += inserted;
+
+  // Mark duplicates as skipped with a clear reason
+  const returnedBarcodes = new Set(
+    (Array.isArray(data) ? data : []).map((r: any) => String(r.barcode))
+  );
+
+  for (const row of chunk) {
+    if (!returnedBarcodes.has(String(row.barcode))) {
+      duplicateCount += 1;
+      // Push a concise reason; cap later via MAX_SKIPPED_RETURN in the response
+      skipped.push({
+        ...row,
+        reason: `❌ Barcode already exists (duplicate): "${row.barcode}"`,
+      });
+    }
+  }
+}
+
 
     // ---------- 6) Respond (legacy + detailed) ----------
     return json({
