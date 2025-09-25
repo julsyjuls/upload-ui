@@ -1,12 +1,12 @@
-// upload.ts — Batched CSV upload with chunked preloads, CORS, and legacy UI keys
+// upload.ts — Big-file safe: chunked preloads (smaller), CORS, phase-tagged errors, legacy UI keys
 
 export const SUPABASE_URL = "https://idtwjchmeldqwurigvkx.supabase.co";
 
 // ---------- tunables ----------
-const INVENTORY_CHUNK_SIZE = 400;
-const MAX_SKIPPED_RETURN = 200;
-const SKU_IN_CHUNK = 150;
-const BATCH_IN_CHUNK = 150;
+const INVENTORY_CHUNK_SIZE = 300;   // slightly smaller for smoother inserts
+const MAX_SKIPPED_RETURN   = 200;   // cap verbose skipped list
+const SKU_IN_CHUNK         = 60;    // smaller chunks -> shorter URLs, fewer 414s
+const BATCH_IN_CHUNK       = 60;    // ditto
 // --------------------------------
 
 type RawRow = {
@@ -36,38 +36,38 @@ const CORS_HEADERS = {
 };
 
 export async function onRequestOptions() {
-  // CORS preflight
-  return new Response(JSON.stringify({ ok: true, added: 0, addedCount: 0, skipped: 0 }), {
-    status: 204,
-    headers: CORS_HEADERS,
-  });
+  // Proper preflight: no body for 204
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
 export async function onRequestPost(context: any) {
   const { SUPABASE_SERVICE_ROLE_KEY } = context.env;
   const SB_KEY = SUPABASE_SERVICE_ROLE_KEY as string;
 
-  // counters in outer scope so every early-return still has UI keys
+  // counters live here so *every* return includes them
   let insertedCount = 0;
   const skipped: any[] = [];
+  let phase = "init";
 
   try {
-    if (!SB_KEY) return json({ error: "Missing SUPABASE_SERVICE_ROLE_KEY" }, 500, { insertedCount, skippedArr: skipped });
+    if (!SB_KEY) return json({ error: "Missing SUPABASE_SERVICE_ROLE_KEY", phase }, 500, { insertedCount, skippedArr: skipped });
 
-    // Parse body safely (some clients send text accidentally)
+    // Body parse
     let body: any = null;
     try {
+      phase = "parse_body";
       body = await context.request.json();
     } catch {
-      return json({ error: "Invalid JSON body" }, 400, { insertedCount, skippedArr: skipped });
+      return json({ error: "Invalid JSON body", phase }, 400, { insertedCount, skippedArr: skipped });
     }
 
     const inputRows: RawRow[] = Array.isArray(body?.rows) ? body.rows : [];
     if (!inputRows.length) {
-      return json({ error: "No rows provided (expected { rows: [...] })" }, 400, { insertedCount, skippedArr: skipped });
+      return json({ error: "No rows provided (expected { rows: [...] })", phase }, 400, { insertedCount, skippedArr: skipped });
     }
 
     // ---------- Normalize & basic validation ----------
+    phase = "normalize_rows";
     const rows: NormalizedRow[] = [];
 
     for (let i = 0; i < inputRows.length; i++) {
@@ -85,8 +85,7 @@ export async function onRequestPost(context: any) {
       if (!row.sku_code || !row.brand_name || !row.batch_no || !row.barcode || !row.date_in) {
         skipped.push({
           ...row,
-          reason:
-            "❌ Missing required field(s). Required: sku_code, brand_name, batch_no, barcode, date_in",
+          reason: "❌ Missing required field(s). Required: sku_code, brand_name, batch_no, barcode, date_in",
         });
         continue;
       }
@@ -94,14 +93,13 @@ export async function onRequestPost(context: any) {
     }
 
     if (!rows.length) {
-      return json({ note: "All rows skipped due to missing required fields" }, 200, { insertedCount, skippedArr: skipped });
+      return json({ note: "All rows skipped due to missing required fields", phase }, 200, { insertedCount, skippedArr: skipped });
     }
 
-    // ---------- Build sets ----------
+    // ---------- Sets ----------
     const skuCodes = new Set(rows.map((r) => r.sku_code));
     const batchKeys = new Set(rows.map((r) => keyBatch(r.sku_code, r.brand_name, r.batch_no)));
 
-    // earliest date_in per (sku|brand|batch) for batches metadata
     const batchEarliestDateIn = new Map<string, string>();
     for (const r of rows) {
       const bk = keyBatch(r.sku_code, r.brand_name, r.batch_no);
@@ -122,7 +120,8 @@ export async function onRequestPost(context: any) {
       return res.json();
     };
 
-    // ---------- 1) Preload SKUs (chunked by sku_code to avoid long URLs) ----------
+    // ---------- 1) Preload SKUs (chunked by sku_code) ----------
+    phase = "preload_skus";
     const skuCodesArr = [...skuCodes];
     const skus: Array<{ id: string; sku_code: string; brand_name: string }> = [];
 
@@ -134,7 +133,6 @@ export async function onRequestPost(context: any) {
       if (Array.isArray(page)) skus.push(...page);
     }
 
-    // exact (sku_code|brand_name)
     const skuMap = new Map<string, { id: string; sku_code: string; brand_name: string }>();
     for (const s of skus) skuMap.set(keySku(s.sku_code, s.brand_name), s);
 
@@ -151,10 +149,11 @@ export async function onRequestPost(context: any) {
     }
 
     if (!usableRows.length) {
-      return json({ note: "All rows skipped due to missing SKUs" }, 200, { insertedCount, skippedArr: skipped });
+      return json({ note: "All rows skipped due to missing SKUs", phase }, 200, { insertedCount, skippedArr: skipped });
     }
 
-    // ---------- 2) Preload batches (chunked by batch_no; filter by sku_id client-side) ----------
+    // ---------- 2) Preload batches (chunked by batch_no) ----------
+    phase = "preload_batches";
     const batchNosArr = [...new Set(usableRows.map((r) => r.batch_no))];
     let batches: Array<{ id: string; sku_id: string; batch_no: string }> = [];
 
@@ -169,7 +168,8 @@ export async function onRequestPost(context: any) {
     const batchMap = new Map<string, { id: string; sku_id: string; batch_no: string }>();
     for (const b of batches) batchMap.set(`${b.sku_id}|${b.batch_no}`, b);
 
-    // ---------- 3) Upsert any missing batches ----------
+    // ---------- 3) Upsert missing batches ----------
+    phase = "upsert_batches";
     const missingBatchPayload: Array<{ sku_id: string; batch_no: string; date_in?: string }> = [];
     for (const bk of batchKeys) {
       const [sku_code, brand_name, batch_no] = splitBatchKey(bk);
@@ -190,10 +190,11 @@ export async function onRequestPost(context: any) {
       });
       if (!upsert.ok) {
         const err = await safeText(upsert);
-        return json({ error: `Failed to upsert batches: ${truncate(err, 300)}` }, 500, { insertedCount, skippedArr: skipped });
+        return json({ error: `Failed to upsert batches: ${truncate(err, 300)}`, phase }, 500, { insertedCount, skippedArr: skipped });
       }
 
-      // Re-fetch batches once to complete the map (same chunked-by-batch_no strategy)
+      // Re-fetch batches once (same chunking)
+      phase = "refetch_batches";
       batches = [];
       for (let i = 0; i < batchNosArr.length; i += BATCH_IN_CHUNK) {
         const part = batchNosArr.slice(i, i + BATCH_IN_CHUNK);
@@ -207,6 +208,7 @@ export async function onRequestPost(context: any) {
     }
 
     // ---------- 4) Build inventory payload ----------
+    phase = "build_inventory_payload";
     const inventoryPayload: any[] = [];
     for (const r of usableRows) {
       const sku = skuMap.get(keySku(r.sku_code, r.brand_name))!;
@@ -220,14 +222,11 @@ export async function onRequestPost(context: any) {
       }
 
       inventoryPayload.push({
-        // keep textual fields (if triggers still read them)
         sku_code: r.sku_code,
         brand_name: r.brand_name,
         batch_no: r.batch_no,
-        // direct FKs
         sku_id: sku.id,
         batch_id: b.id,
-        // inventory fields
         barcode: r.barcode,
         date_in: r.date_in,
         warranty_months: r.warranty_months,
@@ -235,10 +234,11 @@ export async function onRequestPost(context: any) {
     }
 
     if (!inventoryPayload.length) {
-      return json({ note: "Nothing to insert after resolving SKUs/Batches." }, 200, { insertedCount, skippedArr: skipped });
+      return json({ note: "Nothing to insert after resolving SKUs/Batches.", phase }, 200, { insertedCount, skippedArr: skipped });
     }
 
-    // ---------- 5) Chunked bulk insert into inventory ----------
+    // ---------- 5) Chunked bulk insert ----------
+    phase = "insert_inventory_chunks";
     let duplicateCount = 0;
 
     for (let i = 0; i < inventoryPayload.length; i += INVENTORY_CHUNK_SIZE) {
@@ -258,12 +258,10 @@ export async function onRequestPost(context: any) {
         continue;
       }
 
-      // Rows returned = actually inserted (duplicates omitted by PostgREST)
       const data = await res.json();
       const inserted = Array.isArray(data) ? data.length : 0;
       insertedCount += inserted;
 
-      // Mark duplicates as skipped with a clear reason
       const returnedBarcodes = new Set(
         (Array.isArray(data) ? data : []).map((r: any) => String(r.barcode))
       );
@@ -279,17 +277,17 @@ export async function onRequestPost(context: any) {
       }
     }
 
-    // ---------- 6) Respond ----------
+    // ---------- 6) Done ----------
+    phase = "done";
     return json({
       inserted: insertedCount,
       duplicates_skipped: duplicateCount,
       skippedRows: skipped.slice(0, MAX_SKIPPED_RETURN),
-      note:
-        "Batched mode: preloaded SKUs (chunked), upserted batches, and inserted inventory in chunks (on_conflict=barcode).",
+      note: "Batched mode: preloaded SKUs (chunked), upserted batches, inserted inventory (chunked).",
     }, 200, { insertedCount, skippedArr: skipped });
 
   } catch (e: any) {
-    return json({ error: `Unexpected error: ${String(e?.message || e)}` }, 500, { insertedCount, skippedArr: skipped });
+    return json({ error: `Unexpected error: ${String(e?.message || e)}`, phase }, 500, { insertedCount, skippedArr: skipped });
   }
 }
 
@@ -304,7 +302,7 @@ function json(payload: any = {}, status = 200, counters?: { insertedCount?: numb
     added: inserted,
     addedCount: inserted,
     skipped: skippedArr.length,
-    // original payload last (can include error, note, etc.)
+    // payload last (error/note/phase/etc.)
     ...payload,
   };
   return new Response(JSON.stringify(body), {
@@ -313,7 +311,6 @@ function json(payload: any = {}, status = 200, counters?: { insertedCount?: numb
   });
 }
 
-// Accept common CSV header aliases so we don't reject rows unnecessarily
 function remapAliases(r: any) {
   return {
     sku_code: r.sku_code ?? r.sku ?? r.code ?? "",
@@ -338,7 +335,6 @@ function splitBatchKey(k: string): [string, string, string] {
   return [code, brand, batchNo];
 }
 
-// Parse "DD/MM/YYYY" → "YYYY-MM-DD", otherwise try Date(), else pass through
 function normalizeDate(v: any): string {
   if (!v) return "";
   const t = String(v).trim();
@@ -362,7 +358,6 @@ function normalizeInt(v: any): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** Build a URL-safe PostgREST in.(...) list (quoted then percent-encoded) */
 function buildInList(values: string[]): string {
   return values
     .map((s) => `"${s.replace(/"/g, '\\"')}"`)
