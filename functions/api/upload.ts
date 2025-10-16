@@ -1,69 +1,80 @@
-// upload.ts — Big-file safe: chunked preloads (smaller), CORS, phase-tagged errors, legacy UI keys
+// functions/api/upload.ts
+// Upload Inventory CSV — chunked preloads, batch upserts, inventory inserts
+// Cloudflare Pages Functions version (no hardcoded secrets)
 
-export const SUPABASE_URL = "https://idtwjchmeldqwurigvkx.supabase.co";
+export const onRequestOptions = async () =>
+  new Response(null, {
+    status: 204,
+    headers: CORS_HEADERS,
+  });
 
-// ---------- tunables ----------
-const INVENTORY_CHUNK_SIZE = 300;   // slightly smaller for smoother inserts
-const MAX_SKIPPED_RETURN   = 200;   // cap verbose skipped list
-const SKU_IN_CHUNK         = 60;    // smaller chunks -> shorter URLs, fewer 414s
-const BATCH_IN_CHUNK       = 60;    // ditto
-// --------------------------------
-
-type RawRow = {
-  sku_code?: string;
-  brand_name?: string;
-  batch_no?: string;
-  barcode?: string;
-  date_in?: string;
-  warranty_months?: number | string | null;
+// Simple health check to verify env bindings are reaching the function
+export const onRequestGet = async (context: any) => {
+  const url = new URL(context.request.url);
+  if (url.pathname.endsWith("/health")) {
+    const hasKey = !!context.env.SUPABASE_SERVICE_ROLE_KEY;
+    const hasUrl = !!(context.env.SUPABASE_URL || SUPABASE_URL_FALLBACK);
+    return new Response(
+      JSON.stringify(
+        {
+          ok: true,
+          has_key: hasKey,
+          has_url: hasUrl,
+          using_url: context.env.SUPABASE_URL || SUPABASE_URL_FALLBACK,
+        },
+        null,
+        2
+      ),
+      { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+  return new Response("OK", { headers: CORS_HEADERS });
 };
 
-type NormalizedRow = {
-  sku_code: string;
-  brand_name: string;
-  batch_no: string;
-  barcode: string;
-  date_in: string;
-  warranty_months: number | null;
-  __rowIndex: number;
-};
+export const onRequestPost = async (context: any) => {
+  // ---------- tunables ----------
+  const INVENTORY_CHUNK_SIZE = 300;
+  const MAX_SKIPPED_RETURN = 200;
+  const SKU_IN_CHUNK = 60;
+  const BATCH_IN_CHUNK = 60;
+  // ------------------------------
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type",
-  "Content-Type": "application/json",
-};
+  const SB_URL = (context.env.SUPABASE_URL as string) || SUPABASE_URL_FALLBACK;
+  const SB_KEY = context.env.SUPABASE_SERVICE_ROLE_KEY as string;
 
-export async function onRequestOptions() {
-  // Proper preflight: no body for 204
-  return new Response(null, { status: 204, headers: CORS_HEADERS });
-}
-
-export async function onRequestPost(context: any) {
-  const { SUPABASE_SERVICE_ROLE_KEY } = context.env;
-  const SB_KEY = SUPABASE_SERVICE_ROLE_KEY as string;
-
-  // counters live here so *every* return includes them
   let insertedCount = 0;
   const skipped: any[] = [];
   let phase = "init";
 
   try {
-    if (!SB_KEY) return json({ error: "Missing SUPABASE_SERVICE_ROLE_KEY", phase }, 500, { insertedCount, skippedArr: skipped });
+    if (!SB_KEY) {
+      return json(
+        { error: "Missing SUPABASE_SERVICE_ROLE_KEY", phase },
+        500,
+        { insertedCount, skippedArr: skipped }
+      );
+    }
 
-    // Body parse
+    // Parse body
     let body: any = null;
     try {
       phase = "parse_body";
       body = await context.request.json();
     } catch {
-      return json({ error: "Invalid JSON body", phase }, 400, { insertedCount, skippedArr: skipped });
+      return json(
+        { error: "Invalid JSON body", phase },
+        400,
+        { insertedCount, skippedArr: skipped }
+      );
     }
 
     const inputRows: RawRow[] = Array.isArray(body?.rows) ? body.rows : [];
     if (!inputRows.length) {
-      return json({ error: "No rows provided (expected { rows: [...] })", phase }, 400, { insertedCount, skippedArr: skipped });
+      return json(
+        { error: "No rows provided (expected { rows: [...] })", phase },
+        400,
+        { insertedCount, skippedArr: skipped }
+      );
     }
 
     // ---------- Normalize & basic validation ----------
@@ -85,7 +96,8 @@ export async function onRequestPost(context: any) {
       if (!row.sku_code || !row.brand_name || !row.batch_no || !row.barcode || !row.date_in) {
         skipped.push({
           ...row,
-          reason: "❌ Missing required field(s). Required: sku_code, brand_name, batch_no, barcode, date_in",
+          reason:
+            "❌ Missing required field(s). Required: sku_code, brand_name, batch_no, barcode, date_in",
         });
         continue;
       }
@@ -93,7 +105,11 @@ export async function onRequestPost(context: any) {
     }
 
     if (!rows.length) {
-      return json({ note: "All rows skipped due to missing required fields", phase }, 200, { insertedCount, skippedArr: skipped });
+      return json(
+        { note: "All rows skipped due to missing required fields", phase },
+        200,
+        { insertedCount, skippedArr: skipped }
+      );
     }
 
     // ---------- Sets ----------
@@ -116,11 +132,14 @@ export async function onRequestPost(context: any) {
 
     const fetchJson = async (url: string, init?: RequestInit) => {
       const res = await fetch(url, { headers: baseHeaders, ...(init || {}) });
-      if (!res.ok) throw new Error(await safeText(res));
+      if (!res.ok) {
+        const t = await safeText(res);
+        throw new Error(t || `${res.status} ${res.statusText}`);
+      }
       return res.json();
     };
 
-    // ---------- 1) Preload SKUs (chunked by sku_code) ----------
+    // ---------- 1) Preload SKUs ----------
     phase = "preload_skus";
     const skuCodesArr = [...skuCodes];
     const skus: Array<{ id: string; sku_code: string; brand_name: string }> = [];
@@ -128,7 +147,7 @@ export async function onRequestPost(context: any) {
     for (let i = 0; i < skuCodesArr.length; i += SKU_IN_CHUNK) {
       const part = skuCodesArr.slice(i, i + SKU_IN_CHUNK);
       const inlist = buildInList(part);
-      const url = `${SUPABASE_URL}/rest/v1/skus?select=id,sku_code,brand_name&sku_code=in.(${inlist})`;
+      const url = `${SB_URL}/rest/v1/skus?select=id,sku_code,brand_name&sku_code=in.(${inlist})`;
       const page = await fetchJson(url);
       if (Array.isArray(page)) skus.push(...page);
     }
@@ -149,10 +168,14 @@ export async function onRequestPost(context: any) {
     }
 
     if (!usableRows.length) {
-      return json({ note: "All rows skipped due to missing SKUs", phase }, 200, { insertedCount, skippedArr: skipped });
+      return json(
+        { note: "All rows skipped due to missing SKUs", phase },
+        200,
+        { insertedCount, skippedArr: skipped }
+      );
     }
 
-    // ---------- 2) Preload batches (chunked by batch_no) ----------
+    // ---------- 2) Preload batches ----------
     phase = "preload_batches";
     const batchNosArr = [...new Set(usableRows.map((r) => r.batch_no))];
     let batches: Array<{ id: string; sku_id: string; batch_no: string }> = [];
@@ -160,7 +183,7 @@ export async function onRequestPost(context: any) {
     for (let i = 0; i < batchNosArr.length; i += BATCH_IN_CHUNK) {
       const part = batchNosArr.slice(i, i + BATCH_IN_CHUNK);
       const inlist = buildInList(part);
-      const url = `${SUPABASE_URL}/rest/v1/batches?select=id,sku_id,batch_no&batch_no=in.(${inlist})`;
+      const url = `${SB_URL}/rest/v1/batches?select=id,sku_id,batch_no&batch_no=in.(${inlist})`;
       const page = await fetchJson(url);
       if (Array.isArray(page)) batches.push(...page);
     }
@@ -171,6 +194,7 @@ export async function onRequestPost(context: any) {
     // ---------- 3) Upsert missing batches ----------
     phase = "upsert_batches";
     const missingBatchPayload: Array<{ sku_id: string; batch_no: string; date_in?: string }> = [];
+
     for (const bk of batchKeys) {
       const [sku_code, brand_name, batch_no] = splitBatchKey(bk);
       const sku = skuMap.get(keySku(sku_code, brand_name));
@@ -183,23 +207,27 @@ export async function onRequestPost(context: any) {
     }
 
     if (missingBatchPayload.length) {
-      const upsert = await fetch(`${SUPABASE_URL}/rest/v1/batches?on_conflict=sku_id,batch_no`, {
+      const upsert = await fetch(`${SB_URL}/rest/v1/batches?on_conflict=sku_id,batch_no`, {
         method: "POST",
         headers: { ...baseHeaders, Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify(missingBatchPayload),
       });
       if (!upsert.ok) {
         const err = await safeText(upsert);
-        return json({ error: `Failed to upsert batches: ${truncate(err, 300)}`, phase }, 500, { insertedCount, skippedArr: skipped });
+        return json(
+          { error: `Failed to upsert batches: ${truncate(err, 300)}`, phase },
+          500,
+          { insertedCount, skippedArr: skipped }
+        );
       }
 
-      // Re-fetch batches once (same chunking)
+      // Re-fetch batches
       phase = "refetch_batches";
       batches = [];
       for (let i = 0; i < batchNosArr.length; i += BATCH_IN_CHUNK) {
         const part = batchNosArr.slice(i, i + BATCH_IN_CHUNK);
         const inlist = buildInList(part);
-        const url = `${SUPABASE_URL}/rest/v1/batches?select=id,sku_id,batch_no&batch_no=in.(${inlist})`;
+        const url = `${SB_URL}/rest/v1/batches?select=id,sku_id,batch_no&batch_no=in.(${inlist})`;
         const page = await fetchJson(url);
         if (Array.isArray(page)) batches.push(...page);
       }
@@ -220,7 +248,6 @@ export async function onRequestPost(context: any) {
         });
         continue;
       }
-
       inventoryPayload.push({
         sku_code: r.sku_code,
         brand_name: r.brand_name,
@@ -228,13 +255,17 @@ export async function onRequestPost(context: any) {
         sku_id: sku.id,
         batch_id: b.id,
         barcode: r.barcode,
-        date_in: r.date_in,
-        warranty_months: r.warranty_months,
+        date_in: r.date_in, // YYYY-MM-DD
+        warranty_months: r.warranty_months, // null OK
       });
     }
 
     if (!inventoryPayload.length) {
-      return json({ note: "Nothing to insert after resolving SKUs/Batches.", phase }, 200, { insertedCount, skippedArr: skipped });
+      return json(
+        { note: "Nothing to insert after resolving SKUs/Batches.", phase },
+        200,
+        { insertedCount, skippedArr: skipped }
+      );
     }
 
     // ---------- 5) Chunked bulk insert ----------
@@ -244,7 +275,7 @@ export async function onRequestPost(context: any) {
     for (let i = 0; i < inventoryPayload.length; i += INVENTORY_CHUNK_SIZE) {
       const chunk = inventoryPayload.slice(i, i + INVENTORY_CHUNK_SIZE);
 
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/inventory?on_conflict=barcode`, {
+      const res = await fetch(`${SB_URL}/rest/v1/inventory?on_conflict=barcode`, {
         method: "POST",
         headers: { ...baseHeaders, Prefer: "resolution=ignore-duplicates,return=representation" },
         body: JSON.stringify(chunk),
@@ -262,10 +293,10 @@ export async function onRequestPost(context: any) {
       const inserted = Array.isArray(data) ? data.length : 0;
       insertedCount += inserted;
 
+      // If Prefer return=representation didn't echo a row, we treat it as duplicate
       const returnedBarcodes = new Set(
         (Array.isArray(data) ? data : []).map((r: any) => String(r.barcode))
       );
-
       for (const row of chunk) {
         if (!returnedBarcodes.has(String(row.barcode))) {
           duplicateCount += 1;
@@ -277,32 +308,71 @@ export async function onRequestPost(context: any) {
       }
     }
 
-    // ---------- 6) Done ----------
+    // Done
     phase = "done";
-    return json({
-      inserted: insertedCount,
-      duplicates_skipped: duplicateCount,
-      skippedRows: skipped.slice(0, MAX_SKIPPED_RETURN),
-      note: "Batched mode: preloaded SKUs (chunked), upserted batches, inserted inventory (chunked).",
-    }, 200, { insertedCount, skippedArr: skipped });
-
+    return json(
+      {
+        inserted: insertedCount,
+        duplicates_skipped: duplicateCount,
+        skippedRows: skipped.slice(0, MAX_SKIPPED_RETURN),
+        note:
+          "Batched mode: preloaded SKUs (chunked), upserted batches, inserted inventory (chunked).",
+      },
+      200,
+      { insertedCount, skippedArr: skipped }
+    );
   } catch (e: any) {
-    return json({ error: `Unexpected error: ${String(e?.message || e)}`, phase }, 500, { insertedCount, skippedArr: skipped });
+    return json(
+      { error: `Unexpected error: ${String(e?.message || e)}`, phase },
+      500,
+      { insertedCount, skippedArr: skipped }
+    );
   }
-}
+};
 
-// ---------------- helpers ----------------
+// ---------------- Types & helpers ----------------
 
-/** Always include UI fields + CORS headers */
-function json(payload: any = {}, status = 200, counters?: { insertedCount?: number, skippedArr?: any[] }) {
+type RawRow = {
+  sku_code?: string;
+  brand_name?: string;
+  batch_no?: string;
+  barcode?: string;
+  date_in?: string;
+  warranty_months?: number | string | null;
+};
+
+type NormalizedRow = {
+  sku_code: string;
+  brand_name: string;
+  batch_no: string;
+  barcode: string;
+  date_in: string; // YYYY-MM-DD
+  warranty_months: number | null;
+  __rowIndex: number;
+};
+
+const SUPABASE_URL_FALLBACK = "https://idtwjchmeldqwurigvkx.supabase.co";
+
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  "Content-Type": "application/json",
+};
+
+function json(
+  payload: any = {},
+  status = 200,
+  counters?: { insertedCount?: number; skippedArr?: any[] }
+) {
   const inserted = counters?.insertedCount ?? 0;
   const skippedArr = counters?.skippedArr ?? [];
   const body = {
-    // legacy/UI fields always present
+    // legacy/UI fields
     added: inserted,
     addedCount: inserted,
     skipped: skippedArr.length,
-    // payload last (error/note/phase/etc.)
+    // custom payload
     ...payload,
   };
   return new Response(JSON.stringify(body), {
@@ -318,7 +388,8 @@ function remapAliases(r: any) {
     batch_no: r.batch_no ?? r.batch ?? r.batchno ?? "",
     barcode: r.barcode ?? r.code128 ?? "",
     date_in: r.date_in ?? r.date ?? r.datein ?? "",
-    warranty_months: r.warranty_months ?? r.warranty ?? r.warranty_month ?? r.warrantyMonths ?? null,
+    warranty_months:
+      r.warranty_months ?? r.warranty ?? r.warranty_month ?? r.warrantyMonths ?? null,
   };
 }
 
@@ -335,21 +406,23 @@ function splitBatchKey(k: string): [string, string, string] {
   return [code, brand, batchNo];
 }
 
+// Accepts "01/20/2025" or "2025-01-20" and returns "YYYY-MM-DD"
 function normalizeDate(v: any): string {
   if (!v) return "";
   const t = String(v).trim();
 
+  // mm/dd/yyyy
   const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(t);
   if (m) {
-    const dd = m[1].padStart(2, "0");
-    const mm = m[2].padStart(2, "0");
+    const mm = m[1].padStart(2, "0");
+    const dd = m[2].padStart(2, "0");
     const yyyy = m[3];
     return `${yyyy}-${mm}-${dd}`;
   }
 
   const d = new Date(t);
   if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
-  return t;
+  return t; // let DB reject if truly invalid
 }
 
 function normalizeInt(v: any): number | null {
@@ -358,6 +431,7 @@ function normalizeInt(v: any): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+// Build encoded in() list: "A","B" -> %22A%22,%22B%22
 function buildInList(values: string[]): string {
   return values
     .map((s) => `"${s.replace(/"/g, '\\"')}"`)
