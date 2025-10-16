@@ -9,7 +9,6 @@
       font-family: Arial, sans-serif;
       margin: 2rem;
     }
-
     #drop-area {
       border: 2px dashed #999;
       padding: 2rem;
@@ -17,31 +16,22 @@
       margin-bottom: 1rem;
       cursor: pointer;
     }
-
     table {
       border-collapse: collapse;
       width: 100%;
       margin-top: 1rem;
     }
-
     th, td {
       border: 1px solid #ccc;
       padding: 8px;
       text-align: left;
     }
-
     #message {
       margin-bottom: 1rem;
       font-weight: bold;
     }
-
-    .success {
-      color: green;
-    }
-
-    .error {
-      color: red;
-    }
+    .success { color: green; }
+    .error { color: red; }
 
     /* Password overlay styles */
     #auth-overlay {
@@ -58,23 +48,16 @@
       flex-direction: column;
       font-family: sans-serif;
     }
-
     #auth-overlay input {
       padding: 0.5rem;
       font-size: 1rem;
     }
-
     #auth-overlay button {
       margin-top: 1rem;
       padding: 0.5rem 1rem;
       font-size: 1rem;
     }
-
-    #auth-error {
-      color: red;
-      margin-top: 0.5rem;
-    }
-
+    #auth-error { color: red; margin-top: 0.5rem; }
     #note {
       background: #f9f9f9;
       border: 1px solid #eee;
@@ -104,16 +87,14 @@
   <div id="preview"></div>
   <div id="errors" style="margin-top: 1rem;"></div>
   <button id="uploadBtn">Upload to Supabase</button>
-
   <input type="file" id="fileElem" accept=".csv" style="display:none" />
 
   <script>
     // 🔐 Password protection logic
     function checkPassword() {
       const password = document.getElementById("auth-password").value;
-      const correctPassword = "safebatch2025"; // 🔒 Change this anytime
+      const correctPassword = "safebatch2025";
       const errorMsg = document.getElementById("auth-error");
-
       if (password === correctPassword) {
         document.getElementById("auth-overlay").remove();
       } else {
@@ -140,44 +121,28 @@
         errorsDiv.innerHTML = '';
         return;
       }
-
       let html = '<h3>Skipped Rows:</h3><table><thead><tr>';
       const keys = Object.keys(skippedRows[0]);
       keys.forEach(key => html += `<th>${key}</th>`);
       html += '</tr></thead><tbody>';
-
       skippedRows.forEach(row => {
         html += '<tr>';
         keys.forEach(key => html += `<td>${row[key]}</td>`);
         html += '</tr>';
       });
       html += '</tbody></table>';
-
       errorsDiv.innerHTML = html;
     }
 
     dropArea.addEventListener('click', () => fileElem.click());
-
-    dropArea.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      dropArea.style.backgroundColor = '#eee';
-    });
-
-    dropArea.addEventListener('dragleave', () => {
-      dropArea.style.backgroundColor = '';
-    });
-
-    dropArea.addEventListener('drop', (e) => {
-      e.preventDefault();
-      dropArea.style.backgroundColor = '';
+    dropArea.addEventListener('dragover', e => { e.preventDefault(); dropArea.style.backgroundColor = '#eee'; });
+    dropArea.addEventListener('dragleave', () => dropArea.style.backgroundColor = '');
+    dropArea.addEventListener('drop', e => {
+      e.preventDefault(); dropArea.style.backgroundColor = '';
       const file = e.dataTransfer.files[0];
       handleFile(file);
     });
-
-    fileElem.addEventListener('change', (e) => {
-      const file = e.target.files[0];
-      handleFile(file);
-    });
+    fileElem.addEventListener('change', e => handleFile(e.target.files[0]));
 
     function handleFile(file) {
       const reader = new FileReader();
@@ -188,17 +153,9 @@
           const values = line.split(',').map(v => v.trim());
           const obj = {};
           headers.forEach((h, i) => obj[h] = values[i]);
-          // minimal cleanup
-          if (obj.sku_code) obj.sku_code = obj.sku_code.trim();
-          if (obj.brand_name) obj.brand_name = obj.brand_name.trim();
-          if (obj.batch_no) obj.batch_no = obj.batch_no.trim();
-          if (obj.barcode) obj.barcode = obj.barcode.trim();
-          if (obj.date_in) obj.date_in = obj.date_in.trim();
-          if (obj.warranty_months) obj.warranty_months = obj.warranty_months.trim();
           return obj;
         });
 
-        // Show preview table
         const table = document.createElement('table');
         const thead = document.createElement('thead');
         const tr = document.createElement('tr');
@@ -235,27 +192,30 @@
       errorsDiv.innerHTML = '';
 
       try {
-              const response = await fetch('/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows: parsedData }),
-      });
+        const response = await fetch('/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rows: parsedData }),
+        });
 
-
-        const text = await response.text();
+        const raw = await response.text();
         let result;
-        try {
-          result = JSON.parse(text);
-        } catch (err) {
-          showMessage('Upload failed: Invalid JSON response', 'error');
-          console.error('🧨 Raw response:', text);
+        try { result = JSON.parse(raw); }
+        catch {
+          console.error('Raw (not JSON):', raw);
+          showMessage('Upload failed: server did not return JSON.', 'error');
           return;
         }
 
-        if (response.ok && result.inserted > 0) {
-          showMessage(`✅ Upload complete: ${result.inserted} added, ${result.skipped} skipped`, 'success');
+        const added   = result.inserted ?? result.added ?? result.addedCount ?? 0;
+        const skipped = result.skipped ?? 0;
+
+        if (!response.ok || result.error) {
+          showMessage(`⚠️ Upload error (phase: ${result.phase || 'n/a'}): ${result.error || 'Unknown'}`, 'error');
+        } else if (added > 0) {
+          showMessage(`✅ Upload complete: ${added} added, ${skipped} skipped`, 'success');
         } else {
-          showMessage(`⚠️ Upload processed: ${result.inserted} added, ${result.skipped} skipped`, 'error');
+          showMessage(`⚠️ Upload processed: ${added} added, ${skipped} skipped`, 'error');
         }
 
         showErrors(result.skippedRows);
@@ -268,6 +228,3 @@
   </script>
 </body>
 </html>
-
-
-
