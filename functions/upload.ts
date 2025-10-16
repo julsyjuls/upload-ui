@@ -1,6 +1,5 @@
-// functions/api/upload.ts
-// Upload Inventory CSV — chunked preloads, batch upserts, inventory inserts
-// Cloudflare Pages Functions version (no hardcoded secrets)
+// functions/upload.ts
+// Upload Inventory CSV — chunked preloads, global batch_no upserts, inventory inserts
 
 export const onRequestOptions = async () =>
   new Response(null, {
@@ -112,17 +111,6 @@ export const onRequestPost = async (context: any) => {
       );
     }
 
-    // ---------- Sets ----------
-    const skuCodes = new Set(rows.map((r) => r.sku_code));
-    const batchKeys = new Set(rows.map((r) => keyBatch(r.sku_code, r.brand_name, r.batch_no)));
-
-    const batchEarliestDateIn = new Map<string, string>();
-    for (const r of rows) {
-      const bk = keyBatch(r.sku_code, r.brand_name, r.batch_no);
-      const ex = batchEarliestDateIn.get(bk);
-      if (!ex || r.date_in < ex) batchEarliestDateIn.set(bk, r.date_in);
-    }
-
     // ---------- Helpers ----------
     const baseHeaders = {
       apikey: SB_KEY,
@@ -141,7 +129,7 @@ export const onRequestPost = async (context: any) => {
 
     // ---------- 1) Preload SKUs ----------
     phase = "preload_skus";
-    const skuCodesArr = [...skuCodes];
+    const skuCodesArr = [...new Set(rows.map((r) => r.sku_code))];
     const skus: Array<{ id: string; sku_code: string; brand_name: string }> = [];
 
     for (let i = 0; i < skuCodesArr.length; i += SKU_IN_CHUNK) {
@@ -175,7 +163,7 @@ export const onRequestPost = async (context: any) => {
       );
     }
 
-    // ---------- 2) Preload batches ----------
+    // ---------- 2) Preload batches (GLOBAL by batch_no) ----------
     phase = "preload_batches";
     const batchNosArr = [...new Set(usableRows.map((r) => r.batch_no))];
     let batches: Array<{ id: string; sku_id: string; batch_no: string }> = [];
@@ -188,40 +176,63 @@ export const onRequestPost = async (context: any) => {
       if (Array.isArray(page)) batches.push(...page);
     }
 
+    // IMPORTANT: key map by batch_no (global), not by sku_id|batch_no
     const batchMap = new Map<string, { id: string; sku_id: string; batch_no: string }>();
-    for (const b of batches) batchMap.set(`${b.sku_id}|${b.batch_no}`, b);
+    for (const b of batches) batchMap.set(b.batch_no, b);
 
-    // ---------- 3) Upsert missing batches ----------
+    // ---------- 3) Upsert missing batches (GLOBAL by batch_no) ----------
     phase = "upsert_batches";
-    const missingBatchPayload: Array<{ sku_id: string; batch_no: string; date_in?: string }> = [];
 
-    for (const bk of batchKeys) {
-      const [sku_code, brand_name, batch_no] = splitBatchKey(bk);
-      const sku = skuMap.get(keySku(sku_code, brand_name));
-      if (!sku) continue; // already skipped above
-      const k = `${sku.id}|${batch_no}`;
-      if (!batchMap.has(k)) {
-        const earliest = batchEarliestDateIn.get(bk);
-        missingBatchPayload.push({ sku_id: sku.id, batch_no, ...(earliest ? { date_in: earliest } : {}) });
+    // Earliest date_in per batch_no (global)
+    const batchEarliestByNo = new Map<string, string>();
+    for (const r of usableRows) {
+      const ex = batchEarliestByNo.get(r.batch_no);
+      if (!ex || r.date_in < ex) batchEarliestByNo.set(r.batch_no, r.date_in);
+    }
+
+    // Representative sku_id per batch_no (first seen)
+    const batchNoToSkuId = new Map<string, string>();
+    for (const r of usableRows) {
+      const sku = skuMap.get(keySku(r.sku_code, r.brand_name))!;
+      if (!batchNoToSkuId.has(r.batch_no)) batchNoToSkuId.set(r.batch_no, sku.id);
+    }
+
+    const missingBatchPayload: Array<{ sku_id: string; batch_no: string; date_in?: string }> = [];
+    for (const bn of batchNosArr) {
+      if (!batchMap.has(bn)) {
+        const sku_id = batchNoToSkuId.get(bn)!;
+        const earliest = batchEarliestByNo.get(bn);
+        missingBatchPayload.push({ sku_id, batch_no: bn, ...(earliest ? { date_in: earliest } : {}) });
       }
     }
 
     if (missingBatchPayload.length) {
-      const upsert = await fetch(`${SB_URL}/rest/v1/batches?on_conflict=sku_id,batch_no`, {
+      // Match your DB's unique constraint (batches_batch_no_norm_uq)
+      const upsert = await fetch(`${SB_URL}/rest/v1/batches?on_conflict=batch_no_norm`, {
         method: "POST",
         headers: { ...baseHeaders, Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify(missingBatchPayload),
       });
+
       if (!upsert.ok) {
-        const err = await safeText(upsert);
-        return json(
-          { error: `Failed to upsert batches: ${truncate(err, 300)}`, phase },
-          500,
-          { insertedCount, skippedArr: skipped }
-        );
+        const errText = await safeText(upsert);
+        const isConflict =
+          upsert.status === 409 ||
+          /23505/.test(errText) ||
+          /duplicate key value/.test(errText) ||
+          /unique constraint/i.test(errText);
+
+        if (!isConflict) {
+          return json(
+            { error: `Failed to upsert batches: ${truncate(errText, 300)}`, phase },
+            500,
+            { insertedCount, skippedArr: skipped }
+          );
+        }
+        // else: duplicates mean batch already exists -> proceed
       }
 
-      // Re-fetch batches
+      // Re-fetch batches by batch_no to refresh ids
       phase = "refetch_batches";
       batches = [];
       for (let i = 0; i < batchNosArr.length; i += BATCH_IN_CHUNK) {
@@ -232,7 +243,7 @@ export const onRequestPost = async (context: any) => {
         if (Array.isArray(page)) batches.push(...page);
       }
       batchMap.clear();
-      for (const b of batches) batchMap.set(`${b.sku_id}|${b.batch_no}`, b);
+      for (const b of batches) batchMap.set(b.batch_no, b);
     }
 
     // ---------- 4) Build inventory payload ----------
@@ -240,11 +251,12 @@ export const onRequestPost = async (context: any) => {
     const inventoryPayload: any[] = [];
     for (const r of usableRows) {
       const sku = skuMap.get(keySku(r.sku_code, r.brand_name))!;
-      const b = batchMap.get(`${sku.id}|${r.batch_no}`);
+      const b = batchMap.get(r.batch_no); // GLOBAL lookup by batch_no
+
       if (!b) {
         skipped.push({
           ...r,
-          reason: `❌ Batch not resolved for (sku="${r.sku_code}|${r.brand_name}", batch_no="${r.batch_no}")`,
+          reason: `❌ Batch not resolved for (batch_no="${r.batch_no}")`,
         });
         continue;
       }
@@ -253,9 +265,9 @@ export const onRequestPost = async (context: any) => {
         brand_name: r.brand_name,
         batch_no: r.batch_no,
         sku_id: sku.id,
-        batch_id: b.id,
+        batch_id: b.id,          // global container batch id
         barcode: r.barcode,
-        date_in: r.date_in, // YYYY-MM-DD
+        date_in: r.date_in,      // YYYY-MM-DD
         warranty_months: r.warranty_months, // null OK
       });
     }
@@ -316,7 +328,7 @@ export const onRequestPost = async (context: any) => {
         duplicates_skipped: duplicateCount,
         skippedRows: skipped.slice(0, MAX_SKIPPED_RETURN),
         note:
-          "Batched mode: preloaded SKUs (chunked), upserted batches, inserted inventory (chunked).",
+          "Batched mode: preloaded SKUs (chunked), upserted global batches by batch_no, inserted inventory (chunked).",
       },
       200,
       { insertedCount, skippedArr: skipped }
@@ -397,10 +409,10 @@ function keySku(code: string, brand: string) {
   return `${code}┃${brand}`;
 }
 
+// (left for backward-compat; unused with global batch_no)
 function keyBatch(code: string, brand: string, batchNo: string) {
   return `${code}┃${brand}┃${batchNo}`;
 }
-
 function splitBatchKey(k: string): [string, string, string] {
   const [code, brand, batchNo] = k.split("┃");
   return [code, brand, batchNo];
