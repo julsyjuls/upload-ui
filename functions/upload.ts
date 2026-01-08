@@ -320,9 +320,9 @@ export const onRequestPost = async (context: any) => {
       }
     }
 
-    // ---------- FINAL STEP: Recalc batch ranks (run once per upload) ----------
-    phase = "recalc_batch_ranks";
-    await recalcBatchRanks(SB_URL, SB_KEY);
+    // NOTE: Batch ranks are maintained by DB triggers now.
+// (We removed the global recalc RPC because it times out on large tables.)
+
 
     // Done
     phase = "done";
@@ -467,19 +467,3 @@ function truncate(s: string, n: number) {
   return s && s.length > n ? s.slice(0, n) + "…" : s;
 }
 
-async function recalcBatchRanks(SB_URL: string, SB_KEY: string) {
-  const url = `${SB_URL}/rest/v1/rpc/recalc_inventory_batch_rank`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      apikey: SB_KEY,
-      Authorization: `Bearer ${SB_KEY}`,
-      "Content-Type": "application/json",
-    },
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Recalc batch ranks failed: ${text}`);
-  }
-}
