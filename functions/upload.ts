@@ -133,12 +133,17 @@ export const onRequestPost = async (context: any) => {
     const skus: Array<{ id: string; sku_code: string; brand_name: string }> = [];
 
     for (let i = 0; i < skuCodesArr.length; i += SKU_IN_CHUNK) {
-      const part = skuCodesArr.slice(i, i + SKU_IN_CHUNK);
-      const inlist = buildInList(part);
-      const url = `${SB_URL}/rest/v1/skus?select=id,sku_code,brand_name&sku_code=in.(${inlist})`;
-      const page = await fetchJson(url);
-      if (Array.isArray(page)) skus.push(...page);
-    }
+  const part = skuCodesArr.slice(i, i + SKU_IN_CHUNK);
+
+  const params = new URLSearchParams();
+  params.set("select", "id,sku_code,brand_name");
+  params.set("sku_code", `in.(${buildInList(part)})`);
+
+  const url = `${SB_URL}/rest/v1/skus?${params.toString()}`;
+  const page = await fetchJson(url);
+  if (Array.isArray(page)) skus.push(...page);
+}
+
 
     const skuMap = new Map<string, { id: string; sku_code: string; brand_name: string }>();
     for (const s of skus) skuMap.set(keySku(s.sku_code, s.brand_name), s);
@@ -447,13 +452,13 @@ function normalizeInt(v: any): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-// Build encoded in() list: "A","B" -> %22A%22,%22B%22
+// Build in() list for PostgREST: "A","B"
 function buildInList(values: string[]): string {
   return values
-    .map((s) => `"${s.replace(/"/g, '\\"')}"`)
-    .map((q) => encodeURIComponent(q))
+    .map((s) => `"${String(s).replace(/"/g, '""')}"`)
     .join(",");
 }
+
 
 async function safeText(res: Response) {
   try {
