@@ -128,51 +128,49 @@ export const onRequestPost = async (context: any) => {
     };
 
     // ---------- 1) Preload SKUs ----------
-    phase = "preload_skus";
-    const skuCodesArr = [...new Set(rows.map((r) => r.sku_code))];
-    const skus: Array<{ id: string; sku_code: string; brand_name: string }> = [];
+phase = "preload_skus";
+const skuCodesArr = [...new Set(rows.map((r) => r.sku_code))];
+const skus: Array<{ id: string; sku_code: string; brand_name: string }> = [];
 
-    for (let i = 0; i < skuCodesArr.length; i += SKU_IN_CHUNK) {
+for (let i = 0; i < skuCodesArr.length; i += SKU_IN_CHUNK) {
   const part = skuCodesArr.slice(i, i + SKU_IN_CHUNK);
 
-  const params = new URLSearchParams();
-  params.set("select", "id,sku_code,brand_name");
-  params.set("sku_code", `in.(${buildInList(part)})`);
+  // Build: or=(sku_code.eq."A",sku_code.eq."B",...)
+  const orFilter = part
+    .map((v) => `sku_code.eq.${JSON.stringify(v)}`)
+    .join(",");
 
-  const url = `${SB_URL}/rest/v1/skus?${params.toString()}`;
+  const url = `${SB_URL}/rest/v1/skus?select=id,sku_code,brand_name&or=(${encodeURIComponent(
+    orFilter
+  )})`;
+
   const page = await fetchJson(url);
   if (Array.isArray(page)) skus.push(...page);
 }
 
+const skuMap = new Map<string, { id: string; sku_code: string; brand_name: string }>();
+for (const s of skus) skuMap.set(keySku(s.sku_code, s.brand_name), s);
 
-    const skuMap = new Map<string, { id: string; sku_code: string; brand_name: string }>();
-    for (const s of skus) skuMap.set(keySku(s.sku_code, s.brand_name), s);
+const usableRows: NormalizedRow[] = [];
+for (const r of rows) {
+  if (!skuMap.has(keySku(r.sku_code, r.brand_name))) {
+    skipped.push({
+      ...r,
+      reason: `❌ SKU not found for (sku_code="${r.sku_code}", brand_name="${r.brand_name}")`,
+    });
+  } else {
+    usableRows.push(r);
+  }
+}
 
-    // DEBUG (temporary): show what the preload actually returned
-skipped.push({
-  reason: `DEBUG skus returned: ${skus.map(s => `${s.sku_code} | ${s.brand_name}`).join(" || ")}`
-});
+if (!usableRows.length) {
+  return json(
+    { note: "All rows skipped due to missing SKUs", phase },
+    200,
+    { insertedCount, skippedArr: skipped }
+  );
+}
 
-
-    const usableRows: NormalizedRow[] = [];
-    for (const r of rows) {
-      if (!skuMap.has(keySku(r.sku_code, r.brand_name))) {
-        skipped.push({
-          ...r,
-          reason: `❌ SKU not found for (sku_code="${r.sku_code}", brand_name="${r.brand_name}")`,
-        });
-      } else {
-        usableRows.push(r);
-      }
-    }
-
-    if (!usableRows.length) {
-      return json(
-        { note: "All rows skipped due to missing SKUs", phase },
-        200,
-        { insertedCount, skippedArr: skipped }
-      );
-    }
 
     // ---------- 2) Preload batches (GLOBAL by batch_no) ----------
     phase = "preload_batches";
