@@ -148,6 +148,12 @@ export const onRequestPost = async (context: any) => {
     const skuMap = new Map<string, { id: string; sku_code: string; brand_name: string }>();
     for (const s of skus) skuMap.set(keySku(s.sku_code, s.brand_name), s);
 
+    // DEBUG (temporary): show what the preload actually returned
+skipped.push({
+  reason: `DEBUG skus returned: ${skus.map(s => `${s.sku_code} | ${s.brand_name}`).join(" || ")}`
+});
+
+
     const usableRows: NormalizedRow[] = [];
     for (const r of rows) {
       if (!skuMap.has(keySku(r.sku_code, r.brand_name))) {
