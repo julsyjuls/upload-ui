@@ -1,5 +1,6 @@
 // functions/upload.ts
 // Upload Inventory CSV — chunked preloads, global batch_no upserts, inventory inserts
+// Updated: supports same sku_code across different brands by resolving sku_id via (brand_id, sku_code)
 
 export const onRequestOptions = async () =>
   new Response(null, {
@@ -34,7 +35,10 @@ export const onRequestPost = async (context: any) => {
   // ---------- tunables ----------
   const INVENTORY_CHUNK_SIZE = 300;
   const MAX_SKIPPED_RETURN = 200;
-  const SKU_IN_CHUNK = 60;
+
+  // Preload chunk sizes
+  const BRAND_IN_CHUNK = 60;
+  const SKU_PAIR_CHUNK = 40;
   const BATCH_IN_CHUNK = 60;
   // ------------------------------
 
@@ -92,7 +96,13 @@ export const onRequestPost = async (context: any) => {
         __rowIndex: i,
       };
 
-      if (!row.sku_code || !row.brand_name || !row.batch_no || !row.barcode || !row.date_in) {
+      if (
+        !row.sku_code ||
+        !row.brand_name ||
+        !row.batch_no ||
+        !row.barcode ||
+        !row.date_in
+      ) {
         skipped.push({
           ...row,
           reason:
@@ -127,52 +137,121 @@ export const onRequestPost = async (context: any) => {
       return res.json();
     };
 
-    // ---------- 1) Preload SKUs ----------
-phase = "preload_skus";
-const skuCodesArr = [...new Set(rows.map((r) => r.sku_code))];
-const skus: Array<{ id: string; sku_code: string; brand_name: string }> = [];
+    // ---------- 1) Preload BRANDS (case-insensitive exact match) ----------
+    phase = "preload_brands";
+    const brandNamesArr = [...new Set(rows.map((r) => r.brand_name))];
 
-for (let i = 0; i < skuCodesArr.length; i += SKU_IN_CHUNK) {
-  const part = skuCodesArr.slice(i, i + SKU_IN_CHUNK);
+    const brands: Array<{ id: string; name: string }> = [];
+    for (let i = 0; i < brandNamesArr.length; i += BRAND_IN_CHUNK) {
+      const part = brandNamesArr.slice(i, i + BRAND_IN_CHUNK);
 
-  // Build: or=(sku_code.eq."A",sku_code.eq."B",...)
-  const orFilter = part
-    .map((v) => `sku_code.eq.${JSON.stringify(v)}`)
-    .join(",");
+      // PostgREST: ilike is case-insensitive
+      // Build: or=(name.ilike."Nell",name.ilike."Duramaxx",...)
+      const orFilter = part
+        .map((v) => `name.ilike.${JSON.stringify(v)}`)
+        .join(",");
 
-  const url = `${SB_URL}/rest/v1/skus?select=id,sku_code,brand_name&or=(${encodeURIComponent(
-    orFilter
-  )})`;
+      const url = `${SB_URL}/rest/v1/brands?select=id,name&or=(${encodeURIComponent(
+        orFilter
+      )})`;
 
-  const page = await fetchJson(url);
-  if (Array.isArray(page)) skus.push(...page);
-}
+      const page = await fetchJson(url);
+      if (Array.isArray(page)) brands.push(...page);
+    }
 
-const skuMap = new Map<string, { id: string; sku_code: string; brand_name: string }>();
-for (const s of skus) skuMap.set(keySku(s.sku_code, s.brand_name), s);
+    // Map normalized brand name -> brand row
+    const brandMap = new Map<string, { id: string; name: string }>();
+    for (const b of brands) {
+      brandMap.set(normKey(b.name), b);
+    }
 
-const usableRows: NormalizedRow[] = [];
-for (const r of rows) {
-  if (!skuMap.has(keySku(r.sku_code, r.brand_name))) {
-    skipped.push({
-      ...r,
-      reason: `❌ SKU not found for (sku_code="${r.sku_code}", brand_name="${r.brand_name}")`,
-    });
-  } else {
-    usableRows.push(r);
-  }
-}
+    // Attach brand_id to rows (skip if brand not found)
+    const rowsWithBrand: Array<NormalizedRow & { brand_id: string }> = [];
+    for (const r of rows) {
+      const b = brandMap.get(normKey(r.brand_name));
+      if (!b) {
+        skipped.push({
+          ...r,
+          reason: `❌ Brand not found: "${r.brand_name}"`,
+        });
+        continue;
+      }
+      rowsWithBrand.push({ ...r, brand_id: b.id });
+    }
 
-if (!usableRows.length) {
-  return json(
-    { note: "All rows skipped due to missing SKUs", phase },
-    200,
-    { insertedCount, skippedArr: skipped }
-  );
-}
+    if (!rowsWithBrand.length) {
+      return json(
+        { note: "All rows skipped due to missing brands", phase },
+        200,
+        { insertedCount, skippedArr: skipped }
+      );
+    }
 
+    // ---------- 2) Preload SKUs by (brand_id, sku_code) ----------
+    phase = "preload_skus";
 
-    // ---------- 2) Preload batches (GLOBAL by batch_no) ----------
+    type SkuRow = { id: string; sku_code: string; brand_id: string };
+
+    // Unique pairs: brand_id┃sku_code
+    const skuPairs = [
+      ...new Set(rowsWithBrand.map((r) => `${r.brand_id}┃${r.sku_code}`)),
+    ];
+
+    const skus: SkuRow[] = [];
+    for (let i = 0; i < skuPairs.length; i += SKU_PAIR_CHUNK) {
+      const part = skuPairs.slice(i, i + SKU_PAIR_CHUNK);
+
+      // Build:
+      // or=(and(brand_id.eq.<id>,sku_code.eq."A"),and(brand_id.eq.<id>,sku_code.eq."B"),...)
+      const orFilter = part
+        .map((k) => {
+          const [brand_id, sku_code] = k.split("┃");
+          return `and(brand_id.eq.${brand_id},sku_code.eq.${JSON.stringify(
+            sku_code
+          )})`;
+        })
+        .join(",");
+
+      const url = `${SB_URL}/rest/v1/skus?select=id,sku_code,brand_id&or=(${encodeURIComponent(
+        orFilter
+      )})`;
+
+      const page = await fetchJson(url);
+      if (Array.isArray(page)) skus.push(...page);
+    }
+
+    // Map brand_id┃sku_code -> sku row
+    const skuMap = new Map<string, SkuRow>();
+    for (const s of skus) {
+      skuMap.set(`${s.brand_id}┃${s.sku_code}`, s);
+    }
+
+    // Validate SKUs exist and attach sku_id
+    const usableRows: Array<
+      NormalizedRow & { brand_id: string; sku_id: string }
+    > = [];
+
+    for (const r of rowsWithBrand) {
+      const s = skuMap.get(`${r.brand_id}┃${r.sku_code}`);
+      if (!s) {
+        skipped.push({
+          ...r,
+          reason: `❌ SKU not found for (brand_name="${r.brand_name}", sku_code="${r.sku_code}")`,
+        });
+      } else {
+        usableRows.push({ ...r, sku_id: s.id });
+      }
+    }
+
+    if (!usableRows.length) {
+      return json(
+        { note: "All rows skipped due to missing SKUs", phase },
+        200,
+        { insertedCount, skippedArr: skipped }
+      );
+    }
+
+    // ---------- 3) Preload batches (GLOBAL by batch_no) ----------
     phase = "preload_batches";
     const batchNosArr = [...new Set(usableRows.map((r) => r.batch_no))];
     let batches: Array<{ id: string; sku_id: string; batch_no: string }> = [];
@@ -186,10 +265,13 @@ if (!usableRows.length) {
     }
 
     // IMPORTANT: key map by batch_no (global), not by sku_id|batch_no
-    const batchMap = new Map<string, { id: string; sku_id: string; batch_no: string }>();
+    const batchMap = new Map<
+      string,
+      { id: string; sku_id: string; batch_no: string }
+    >();
     for (const b of batches) batchMap.set(b.batch_no, b);
 
-    // ---------- 3) Upsert missing batches (GLOBAL by batch_no) ----------
+    // ---------- 4) Upsert missing batches (GLOBAL by batch_no) ----------
     phase = "upsert_batches";
 
     // Earliest date_in per batch_no (global)
@@ -202,26 +284,40 @@ if (!usableRows.length) {
     // Representative sku_id per batch_no (first seen)
     const batchNoToSkuId = new Map<string, string>();
     for (const r of usableRows) {
-      const sku = skuMap.get(keySku(r.sku_code, r.brand_name))!;
-      if (!batchNoToSkuId.has(r.batch_no)) batchNoToSkuId.set(r.batch_no, sku.id);
+      if (!batchNoToSkuId.has(r.batch_no)) batchNoToSkuId.set(r.batch_no, r.sku_id);
     }
 
-    const missingBatchPayload: Array<{ sku_id: string; batch_no: string; date_in?: string }> = [];
+    const missingBatchPayload: Array<{
+      sku_id: string;
+      batch_no: string;
+      date_in?: string;
+    }> = [];
+
     for (const bn of batchNosArr) {
       if (!batchMap.has(bn)) {
         const sku_id = batchNoToSkuId.get(bn)!;
         const earliest = batchEarliestByNo.get(bn);
-        missingBatchPayload.push({ sku_id, batch_no: bn, ...(earliest ? { date_in: earliest } : {}) });
+        missingBatchPayload.push({
+          sku_id,
+          batch_no: bn,
+          ...(earliest ? { date_in: earliest } : {}),
+        });
       }
     }
 
     if (missingBatchPayload.length) {
       // Match your DB's unique constraint (batches_batch_no_norm_uq)
-      const upsert = await fetch(`${SB_URL}/rest/v1/batches?on_conflict=batch_no_norm`, {
-        method: "POST",
-        headers: { ...baseHeaders, Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify(missingBatchPayload),
-      });
+      const upsert = await fetch(
+        `${SB_URL}/rest/v1/batches?on_conflict=batch_no_norm`,
+        {
+          method: "POST",
+          headers: {
+            ...baseHeaders,
+            Prefer: "resolution=merge-duplicates,return=minimal",
+          },
+          body: JSON.stringify(missingBatchPayload),
+        }
+      );
 
       if (!upsert.ok) {
         const errText = await safeText(upsert);
@@ -233,7 +329,10 @@ if (!usableRows.length) {
 
         if (!isConflict) {
           return json(
-            { error: `Failed to upsert batches: ${truncate(errText, 300)}`, phase },
+            {
+              error: `Failed to upsert batches: ${truncate(errText, 300)}`,
+              phase,
+            },
             500,
             { insertedCount, skippedArr: skipped }
           );
@@ -255,11 +354,11 @@ if (!usableRows.length) {
       for (const b of batches) batchMap.set(b.batch_no, b);
     }
 
-    // ---------- 4) Build inventory payload ----------
+    // ---------- 5) Build inventory payload ----------
     phase = "build_inventory_payload";
     const inventoryPayload: any[] = [];
+
     for (const r of usableRows) {
-      const sku = skuMap.get(keySku(r.sku_code, r.brand_name))!;
       const b = batchMap.get(r.batch_no); // GLOBAL lookup by batch_no
 
       if (!b) {
@@ -269,14 +368,15 @@ if (!usableRows.length) {
         });
         continue;
       }
+
       inventoryPayload.push({
         sku_code: r.sku_code,
         brand_name: r.brand_name,
         batch_no: r.batch_no,
-        sku_id: sku.id,
-        batch_id: b.id,          // global container batch id
+        sku_id: r.sku_id,
+        batch_id: b.id, // global container batch id
         barcode: r.barcode,
-        date_in: r.date_in,      // YYYY-MM-DD
+        date_in: r.date_in, // YYYY-MM-DD
         warranty_months: r.warranty_months, // null OK
       });
     }
@@ -289,7 +389,7 @@ if (!usableRows.length) {
       );
     }
 
-    // ---------- 5) Chunked bulk insert ----------
+    // ---------- 6) Chunked bulk insert ----------
     phase = "insert_inventory_chunks";
     let duplicateCount = 0;
 
@@ -298,14 +398,20 @@ if (!usableRows.length) {
 
       const res = await fetch(`${SB_URL}/rest/v1/inventory?on_conflict=barcode`, {
         method: "POST",
-        headers: { ...baseHeaders, Prefer: "resolution=ignore-duplicates,return=representation" },
+        headers: {
+          ...baseHeaders,
+          Prefer: "resolution=ignore-duplicates,return=representation",
+        },
         body: JSON.stringify(chunk),
       });
 
       if (!res.ok) {
         const err = await safeText(res);
         for (const bad of chunk) {
-          skipped.push({ ...bad, reason: `❌ Supabase error (bulk insert): ${truncate(err, 300)}` });
+          skipped.push({
+            ...bad,
+            reason: `❌ Supabase error (bulk insert): ${truncate(err, 300)}`,
+          });
         }
         continue;
       }
@@ -318,6 +424,7 @@ if (!usableRows.length) {
       const returnedBarcodes = new Set(
         (Array.isArray(data) ? data : []).map((r: any) => String(r.barcode))
       );
+
       for (const row of chunk) {
         if (!returnedBarcodes.has(String(row.barcode))) {
           duplicateCount += 1;
@@ -329,10 +436,6 @@ if (!usableRows.length) {
       }
     }
 
-    // NOTE: Batch ranks are maintained by DB triggers now.
-// (We removed the global recalc RPC because it times out on large tables.)
-
-
     // Done
     phase = "done";
     return json(
@@ -341,7 +444,7 @@ if (!usableRows.length) {
         duplicates_skipped: duplicateCount,
         skippedRows: skipped.slice(0, MAX_SKIPPED_RETURN),
         note:
-          "Batched mode: preloaded SKUs (chunked), upserted global batches by batch_no, inserted inventory (chunked).",
+          "Batched mode: preloaded Brands (chunked), preloaded SKUs by (brand_id, sku_code), upserted global batches by batch_no, inserted inventory (chunked).",
       },
       200,
       { insertedCount, skippedArr: skipped }
@@ -414,21 +517,17 @@ function remapAliases(r: any) {
     barcode: r.barcode ?? r.code128 ?? "",
     date_in: r.date_in ?? r.date ?? r.datein ?? "",
     warranty_months:
-      r.warranty_months ?? r.warranty ?? r.warranty_month ?? r.warrantyMonths ?? null,
+      r.warranty_months ??
+      r.warranty ??
+      r.warranty_month ??
+      r.warrantyMonths ??
+      null,
   };
 }
 
-function keySku(code: string, brand: string) {
-  return `${code}┃${brand}`;
-}
-
-// (left for backward-compat; unused with global batch_no)
-function keyBatch(code: string, brand: string, batchNo: string) {
-  return `${code}┃${brand}┃${batchNo}`;
-}
-function splitBatchKey(k: string): [string, string, string] {
-  const [code, brand, batchNo] = k.split("┃");
-  return [code, brand, batchNo];
+// Normalize brand keys for lookup
+function normKey(s: string) {
+  return (s ?? "").trim().toUpperCase();
 }
 
 // Accepts "01/20/2025" or "2025-01-20" and returns "YYYY-MM-DD"
@@ -458,11 +557,8 @@ function normalizeInt(v: any): number | null {
 
 // Build in() list for PostgREST: "A","B"
 function buildInList(values: string[]): string {
-  return values
-    .map((s) => `"${String(s).replace(/"/g, '""')}"`)
-    .join(",");
+  return values.map((s) => `"${String(s).replace(/"/g, '""')}"`).join(",");
 }
-
 
 async function safeText(res: Response) {
   try {
@@ -475,4 +571,3 @@ async function safeText(res: Response) {
 function truncate(s: string, n: number) {
   return s && s.length > n ? s.slice(0, n) + "…" : s;
 }
-
